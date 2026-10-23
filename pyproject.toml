@@ -1,0 +1,39 @@
+[build-system]
+requires = ["hatchling==1.30.1"]
+build-backend = "hatchling.build"
+
+[project]
+name = "valkeep"
+version = "0.1.0"
+description = "운영 Redis 조회 정책을 강제하는 읽기 전용 MCP 프록시"
+requires-python = ">=3.12"
+dependencies = [
+  "anyio==4.15.1",
+  "mcp==1.30.0",
+  "pydantic==2.14.1",
+  "redis-mcp-server==0.5.1",
+]
+
+[project.scripts]
+valkeep = "valkeep.cli:main"
+
+[dependency-groups]
+dev = ["pytest==9.1.1", "pytest-asyncio==1.4.0", "ruff==0.17.2"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "ASYNC"]
+
+[tool.ruff.lint.per-file-ignores]
+# 임시 파일 검증은 호출 종료 후 동기적으로 수행한다.
+"tests/**" = ["ASYNC230", "ASYNC240"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/valkeep"]

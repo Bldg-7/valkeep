@@ -1,0 +1,23 @@
+"""외부 데이터가 포함되지 않는 안정적인 오류 계약."""
+
+from enum import StrEnum
+
+
+class Code(StrEnum):
+    TOOL_DENIED = "TOOL_DENIED"
+    INVALID_ARGUMENT = "INVALID_ARGUMENT"
+    KEY_SCOPE_DENIED = "KEY_SCOPE_DENIED"
+    RATE_LIMITED = "RATE_LIMITED"
+    BUSY = "BUSY"
+    UPSTREAM_UNAVAILABLE = "UPSTREAM_UNAVAILABLE"
+    UPSTREAM_CONTRACT_MISMATCH = "UPSTREAM_CONTRACT_MISMATCH"
+    TIMEOUT = "TIMEOUT"
+    RESPONSE_TOO_LARGE = "RESPONSE_TOO_LARGE"
+    AUDIT_UNAVAILABLE = "AUDIT_UNAVAILABLE"
+    CONFIG_INVALID = "CONFIG_INVALID"
+
+
+class Rejected(Exception):
+    def __init__(self, code: Code):
+        self.code = code
+        super().__init__(code.value)
