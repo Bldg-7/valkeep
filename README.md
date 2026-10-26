@@ -1,80 +1,197 @@
 # Valkeep
 
-여러 Redis를 AI 클라이언트에서 조사할 때 **읽기 전용 권한·조회 범위·호출 예산을 통제하는 로컬 MCP**.
+**English** | [한국어](README_KO.md)
 
-기본 프리셋은 메타데이터만 조회한다. 값 미리보기와 키 탐색은 필요할 때만 따로 켠다. 임의 Redis 명령 실행 기능은 제공하지 않는다.
+**Read-only Redis inspection for AI assistants, with explicit targets, scoped access, and query budgets.**
+
+Valkeep is a local [Model Context Protocol (MCP)](https://modelcontextprotocol.io/) server that puts a policy layer in front of the [official Redis MCP server](https://github.com/redis/mcp-redis). It supports multiple Redis targets without exposing an arbitrary command console.
+
+The default preset provides metadata inspection and connection checks. String previews and key discovery are separate, opt-in features.
 
 ```text
-AI 클라이언트
-  → Valkeep: target_id·도구·키 범위·호출 예산 검사
-    ├─ catalog-cache → 전용 공식 MCP + 안전 조회 어댑터 → ACL 계정 → Redis A
-    └─ job-queue     → 전용 공식 MCP + 안전 조회 어댑터 → ACL 계정 → Redis B
+AI client
+  → Valkeep: target selection, tool permissions, key scopes, and request budgets
+    ├─ catalog-cache → dedicated MCP process + read adapter → ACL user → Redis A
+    └─ job-queue     → dedicated MCP process + read adapter → ACL user → Redis B
 ```
 
-## 제공 기능
+## Features
 
-| 도구 | 기능 | 기본 상태 |
+- **Multiple targets:** Up to 16 targets, each with its own process, credentials, policy, rate limits, and audit log.
+- **Explicit routing:** Every Redis operation requires `target_id`. No implicit default or automatic fallback to another target.
+- **Metadata-first defaults:** Inspect key types, TTLs, and lengths without retrieving values.
+- **Bounded String previews:** Read a prefix with `GETRANGE`, rather than fetching the entire value and truncating it afterward.
+- **Budgeted key discovery:** One SCAN call per request, single-use continuation tokens, and per-session call, time, and observation budgets.
+- **ACL assistance:** Generate a least-privilege permission plan and check an administrator-provided ACL export without changing Redis permissions.
+- **Privacy-conscious audit logs:** Raw keys, values, passwords, and discovery tokens are not written to audit logs.
+
+## Tools
+
+| Tool | Purpose | Default |
 |---|---|---|
-| `list_targets` | 등록 대상·환경·허용 도구·탐색 scope 확인 | 제공 |
-| `inspect_key` | 타입·밀리초 TTL·타입별 길이/개수 | 제공 |
-| `list_length` | List 원소 수 | 제공 |
-| `connection_status` | PING 연결·인증 점검 | 제공 |
-| `preview_key` | String 앞부분의 제한된 바이트 조회 | 명시적으로 활성화 |
-| `find_keys` | 허용 prefix별 한 페이지 탐색·일회용 토큰·누적 예산 | 명시적으로 활성화 |
+| `list_targets` | List configured target IDs, environments, allowed tools, and discovery scope IDs | Available |
+| `inspect_key` | Inspect type, TTL in milliseconds, and type-specific length or count | Enabled |
+| `list_length` | Get the number of elements in a List | Enabled |
+| `connection_status` | Check connectivity and authentication with PING | Enabled |
+| `preview_key` | Preview a bounded prefix of a String value | Opt-in |
+| `find_keys` | Discover one page of keys within an approved prefix | Opt-in |
 
-모든 Redis 조회는 `target_id`를 명시해야 한다. 대상 생략·미등록 ID·허용 범위 밖 접근을 거절하며 다른 대상으로 자동 재시도하지 않는다.
+`inspect_key` supports length/count metadata for String, List, Hash, Set, Sorted Set, and Stream. Unsupported module types return type and TTL information with a null length. Metadata observations are not atomic snapshots.
 
-## 시작
+String previews default to 1,024 bytes and can be configured up to 4,096 bytes. Non-UTF-8 data, including a preview cut through a multibyte character, is returned as base64. Collection value previews are intentionally unsupported: limiting the number of elements does not bound their byte size.
 
-Python 3.12+, macOS/Linux, uv가 필요하다.
+## Requirements
+
+- Python 3.12 or newer
+- macOS or Linux
+- [uv](https://docs.astral.sh/uv/)
+- Standalone Redis; generated ACL plans target Redis **7.2 or newer**
+- A dedicated Redis ACL user with administrator-reviewed permissions
+
+Redis Cluster, Valkey compatibility, hosted HTTP transport, and per-user authorization are outside the current supported scope.
+
+## Quick start
+
+### 1. Install and inspect the example policy
 
 ```bash
+git clone https://github.com/Bldg-7/valkeep.git
+cd valkeep
 uv sync --locked
+
 uv run --locked valkeep --config config/policy.example.toml --check-config
 uv run --locked valkeep --config config/policy.example.toml --acl-plan
 ```
 
-위 명령은 Redis에 접속하거나 권한을 변경하지 않는다. [설정 예시](config/policy.example.toml)를 복사한 뒤 대상·계정·허용 키 범위를 지정하고, 관리자가 ACL을 적용한 다음 사용한다.
+These checks **do not connect to Redis or apply permissions**. The example uses placeholder local targets and requires no credentials for these two commands.
+
+### 2. Configure your targets
+
+```bash
+cp config/policy.example.toml config/policy.local.toml
+```
+
+Edit the [example policy](config/policy.example.toml) for your approved targets:
+
+1. Set each target's ID, environment, host, port, username, and TLS settings.
+2. Specify the key prefixes or exact keys that the AI client may inspect.
+3. Keep `preset = "production-safe"` unless you need an explicitly configured custom policy.
+4. Have an administrator review and apply the generated ACL plan.
+5. Supply each password through the environment variable named by that target's `password_env`, using your secret-management mechanism.
+
+Do not commit passwords or local configuration. `config/*.local.toml`, `.env*`, and `*.jsonl` are ignored by default.
+
+The `production-safe` preset defaults to one MCP request per second and one in-flight request per target. To enable optional features, edit the **existing** `[targets.features]` table for the intended target:
+
+```toml
+[targets.features]
+value_preview = true
+key_discovery = true
+```
+
+Discovery defaults to a COUNT hint of 100, a 10-call and 60-second session budget, an observation budget of 500 keys, and at most four active sessions per target. Observations are counted after receiving a page, so the final page can exceed the observation budget. Redis `SCAN COUNT` is a hint, not a strict response-size limit.
+
+Development and production targets require TLS with certificate and hostname verification. Plaintext connections are allowed only for explicitly configured local loopback targets.
+
+### 3. Check connectivity and run
+
+After reviewing the policy and supplying credentials:
+
+```bash
+uv run --locked valkeep --config config/policy.local.toml \
+  --check-connections --target catalog-cache
+
+uv run --locked valkeep --config config/policy.local.toml
+```
+
+The connection check **does contact Redis**. Omitting `--target` checks every configured target. PING success proves connectivity and authentication, not that the account has exactly the intended read-only permissions.
+
+In server mode, Valkeep waits for MCP requests over stdio. Register Valkeep—not the underlying Redis MCP process—in your MCP client.
+
+A client configuration using the common `mcpServers` format looks like this; replace both absolute paths:
+
+```json
+{
+  "mcpServers": {
+    "valkeep": {
+      "command": "uv",
+      "args": [
+        "--directory", "/absolute/path/to/valkeep",
+        "run", "--locked", "valkeep",
+        "--config", "/absolute/path/to/valkeep/config/policy.local.toml"
+      ]
+    }
+  }
+}
+```
+
+Supply the configured password environment variables through your MCP client's secure environment or secret configuration. Client configuration formats vary.
+
+## Example tool calls
+
+The following examples illustrate MCP tool names and arguments; they are not shell commands.
 
 ```text
 list_targets({})
 inspect_key({"target_id": "catalog-cache", "key": "example:catalog:42"})
+list_length({"target_id": "job-queue", "key": "example:jobs:pending"})
+connection_status({"target_id": "catalog-cache"})
 preview_key({"target_id": "catalog-cache", "key": "example:catalog:42"})
 find_keys({"target_id": "catalog-cache", "scope_id": "prefix-0"})
+find_keys({"target_id": "catalog-cache", "scope_id": "prefix-0", "token": "previous_next_token"})
 ```
 
-미리보기와 탐색은 target의 `features.value_preview`, `features.key_discovery`를 각각 true로 설정해야 사용할 수 있다. 프리셋은 `production-safe`이며, 고급 사용자는 명시적인 `tools`와 제한값을 지정할 수 있다.
+Preview and discovery calls require the corresponding feature to be enabled. Use `list_targets` to find available discovery scope IDs. Continuation tokens are single-use and cannot be reused across targets or scopes. Partial or truncated discovery results are explicitly marked; Valkeep does not silently scan the entire database.
 
-## 안전 경계
-
-- **변경 방지:** 프록시는 쓰기 도구를 거절한다. 실제 계정 권한은 Redis ACL로 제한해야 한다.
-- **부하 완화:** target별 호출률·동시 실행·메시지 크기·탐색 호출/시간/관측 예산을 적용한다. 큰 값을 GET으로 읽은 뒤 잘라내지 않는다.
-- **대상 격리:** 최대 16개의 target에 각각 프로세스·자격증명·정책·감사 로그를 분리한다.
-- **비밀정보 최소화:** 로그에 원본 키·값·비밀번호·탐색 토큰을 남기지 않는다.
-- **명시적 한계:** 읽기도 Redis 자원을 소비한다. SCAN COUNT는 정확한 바이트 상한이 아니며 운영 무영향을 보장하지 않는다.
-- **권한 검증 한계:** ACL 계획은 자동 적용하지 않는다. 관리자 export 검증은 입력 파일의 정책 일치 검사이며 현재 계정의 권한을 실시간 증명하지 않는다.
-
-현재 범위는 standalone Redis용 로컬 stdio다. HTTP 중앙 서비스·사용자별 권한·Cluster·Valkey 인증 지원은 포함하지 않는다.
-
-## 검증
+## ACL planning and verification
 
 ```bash
+uv run --locked valkeep --config config/policy.local.toml \
+  --acl-plan --target catalog-cache
+
+uv run --locked valkeep --config config/policy.local.toml \
+  --verify-acl /secure/path/acl-export.json --target catalog-cache
+```
+
+- **Planning:** Produces a JSON argument list for administrator review. It does not run `ACL SETUSER` or include a password. **The proposed `reset` rule removes existing permissions and passwords**; do not apply it blindly to an existing account.
+- **Verification:** Checks an administrator-provided `redis-cli --json ACL GETUSER <user>` export against the configured policy. It rejects excess permissions, unexpected selectors, channels, and mismatched key scopes.
+- **Limits:** Export verification is offline. It cannot establish the file's provenance, freshness, or the current permissions of a live account. `readonly_acl_confirmed = true` is an operator declaration, not an automated ACL check.
+
+ACL exports contain sensitive information, including password hashes. Handle them securely and do not commit them. Valkeep does not print the raw export or password hashes.
+
+## Safety model and limitations
+
+- **Redis ACLs are the write-protection boundary.** The proxy also rejects unapproved tools and key access, but it does not create or enforce Redis account permissions by itself.
+- **Read-only is not zero-impact.** Reads consume Redis CPU, memory, and network resources. Validate the limits against a representative workload before production use.
+- **Key discovery is not strict resource isolation.** SCAN may traverse a broad keyspace, and ACL key patterns alone do not isolate key-name enumeration. Disable discovery if you require a strict per-command response bound.
+- **Timeout is not server-side cancellation.** Valkeep retains the in-flight slot until execution ends and terminates a stuck child process after its cleanup deadline. This cannot guarantee cancellation of a command already executing in Redis.
+- **Budgets are local.** Limits are per target and per Valkeep process, not shared across multiple instances or different aliases of the same physical Redis.
+- **Access is shared by the local MCP user.** Every configured target is available to that user. This is not a multi-user authorization service.
+- **Protect data sent to AI clients.** Read-only access can still expose sensitive data. Enable previews and discovery only for approved key scopes, and treat returned values as untrusted data.
+
+## Development and testing
+
+```bash
+uv run --locked ruff check .
+uv run --locked ruff format --check .
 uv run --locked pytest -q
 uv run --locked pytest -q -m live
-uv run --locked ruff check .
 uv build
 ```
 
-단위·공식 MCP 통합 테스트와 함께, 설치된 `redis-server`·`openssl`로 임시 로컬 서버를 시작해 실제 ACL·TLS·큰 값·탐색을 검증한다. 테스트는 외부 Redis URL을 받지 않는다. 관련 실행 파일이 없으면 live 테스트는 skip되므로 배포 검증에서는 실행 여부를 확인한다.
+The test suite includes unit tests, official MCP process integration, and live Redis tests. Live tests use locally installed `redis-server` and `openssl` to start isolated temporary servers on random loopback ports. They do not accept external Redis URLs and clean up the processes they create.
 
-실제 운영 환경의 부하 허용치·서비스별 민감정보 범위는 별도 확인이 필요하다. 운영 Redis에는 개발 과정에서 접속하지 않았다.
+Live tests are skipped if required executables are missing. Ensure they actually run in your release validation environment. Verification against a local Redis version is not certification of every Redis deployment or managed service.
 
-## 문서
+The official Redis MCP server 0.5.1, MCP Python SDK 1.30.0, redis-py 8.1.0, and transitive dependencies are pinned through `pyproject.toml` and `uv.lock`.
 
-| 문서 | 내용 |
+## Documentation
+
+The detailed documents below are currently in Korean.
+
+| Document | Contents |
 |---|---|
-| [구현·실행 안내](docs/implementation.md) | 프리셋·설정·ACL 생성/검증·연결 점검·도구·한계 |
-| [요구사항](docs/requirements.md) | 목적, 기능·비기능 요구사항, 수용 기준 |
-| [설계](docs/design.md) | 구조, 정책, 수명 관리, 조회 및 탐색 안전성 |
-
-공식 Redis MCP 0.5.1, MCP SDK 1.30.0, redis-py 8.1.0과 전이 의존성은 `uv.lock`으로 고정한다. 조회 어댑터를 추가해도 공식 서버의 다른 도구가 자동 노출되지는 않는다.
+| [Korean README](README_KO.md) | Korean overview and quick start |
+| [Implementation and operations](docs/implementation.md) | Configuration, presets, ACL workflows, tools, and limitations |
+| [Requirements](docs/requirements.md) | Functional and non-functional requirements and acceptance criteria |
+| [Design](docs/design.md) | Architecture, policies, process lifecycle, and discovery safety |
