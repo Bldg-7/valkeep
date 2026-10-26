@@ -81,7 +81,9 @@ async def test_target_tool_policy_is_enforced(router, upstreams):
 async def test_route_rewrites_only_the_selected_target(router, upstreams):
     result = await router.execute("inspect_key", {"target_id": "catalog", "key": "catalog:a"})
     assert result.structuredContent["meta"]["target_id"] == "catalog"
-    assert upstreams["catalog"].calls == [("type", {"key": "catalog:a"})]
+    assert upstreams["catalog"].calls == [
+        ("valkeep_read", {"request": json.dumps({"operation": "inspect_key", "key": "catalog:a"})})
+    ]
     assert not upstreams["queue"].calls
 
 

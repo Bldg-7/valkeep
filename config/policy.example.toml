@@ -1,49 +1,37 @@
-# 실제 연결 없이 --check-config로 검증할 수 있는 다중 target 예시다.
+# 외부 연결 없이 --check-config / --acl-plan으로 확인할 수 있다.
 policy_version = 2
 audit_path = "../valkeep.router.audit.jsonl"
-max_request_bytes = 8192
-max_response_bytes = 32768
 
 [[targets]]
 id = "catalog-cache"
 environment = "local"
 host = "127.0.0.1"
 port = 6379
-database = 0
 username = "valkeep_catalog_reader"
 password_env = "VALKEEP_CATALOG_PASSWORD"
 tls = false
-# 운영자가 ACL을 검토했다는 선언이며 자동 검증 결과가 아니다.
 readonly_acl_confirmed = true
 allowed_prefixes = ["example:catalog:"]
-allowed_keys = []
-tools = ["inspect_key", "list_length"]
 audit_path = "../valkeep.catalog.audit.jsonl"
-
-[targets.limits]
-max_inflight = 1
-requests_per_second = 1.0
-burst = 1
-response_timeout_seconds = 3.0
-cleanup_timeout_seconds = 5.0
+preset = "production-safe"
+# 기본 프리셋은 메타데이터·연결 점검만 허용한다.
+# 필요한 경우에만 다음 기능을 true로 바꾼다.
+[targets.features]
+value_preview = false
+key_discovery = false
 
 [[targets]]
 id = "job-queue"
 environment = "local"
 host = "127.0.0.1"
 port = 6380
-database = 0
 username = "valkeep_queue_reader"
 password_env = "VALKEEP_QUEUE_PASSWORD"
 tls = false
 readonly_acl_confirmed = true
 allowed_prefixes = ["example:jobs:"]
-tools = ["list_length"]
 audit_path = "../valkeep.queue.audit.jsonl"
+preset = "production-safe"
 
 [targets.limits]
-max_inflight = 1
 requests_per_second = 0.5
-burst = 1
-response_timeout_seconds = 3.0
-cleanup_timeout_seconds = 5.0

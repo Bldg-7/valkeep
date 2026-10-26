@@ -50,7 +50,17 @@ class Audit:
             "policy": self.policy.fingerprint,
             "event": event,
             "request_id": request_id,
-            "tool": tool if tool in {"inspect_key", "list_length", "list_targets"} else "unlisted",
+            "tool": tool
+            if tool
+            in {
+                "inspect_key",
+                "list_length",
+                "list_targets",
+                "preview_key",
+                "find_keys",
+                "connection_status",
+            }
+            else "unlisted",
             "code": code,
             "elapsed_ms": elapsed_ms,
             "response_bytes": response_bytes,

@@ -48,8 +48,19 @@ async def test_mapping_and_safe_audit(policy, upstream):
     proxy = Proxy(policy, upstream, audit)
     result = await proxy.execute("inspect_key", {"key": "safe:private"})
     audit.close()
-    assert result.structuredContent["data"] == {"type": "list", "ttl_seconds": -1}
-    assert upstream.calls == [("type", {"key": "safe:private"})]
+    assert result.structuredContent["data"] == {
+        "type": "list",
+        "ttl_ms": -1,
+        "length": 3,
+        "length_unit": "items",
+        "atomic": False,
+    }
+    assert upstream.calls == [
+        (
+            "valkeep_read",
+            {"request": json.dumps({"operation": "inspect_key", "key": "safe:private"})},
+        )
+    ]
     records = Path(policy.audit_path).read_text()
     assert "safe:private" not in records
     assert [json.loads(line)["event"] for line in records.splitlines()] == ["started", "finished"]

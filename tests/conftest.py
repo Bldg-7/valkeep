@@ -57,10 +57,25 @@ class FakeUpstream:
             raise Rejected(Code.UPSTREAM_UNAVAILABLE)
         if self.result is not None:
             return self.result
-        value = {"key": arguments["key"], "type": "list", "ttl": -1} if name == "type" else 3
+        value = 3
+        if name == "valkeep_read":
+            request = json.loads(arguments["request"])
+            if request["operation"] == "inspect_key":
+                value = {
+                    "ok": True,
+                    "data": {
+                        "type": "list",
+                        "ttl_ms": -1,
+                        "length": 3,
+                        "length_unit": "items",
+                        "atomic": False,
+                    },
+                }
+            elif request["operation"] == "connection_status":
+                value = {"ok": True, "data": {"connected": True}}
         return types.CallToolResult(
             content=[types.TextContent(type="text", text=json.dumps(value))],
-            structuredContent={"result": value},
+            structuredContent={"result": value} if name == "llen" else value,
         )
 
     async def stop(self):

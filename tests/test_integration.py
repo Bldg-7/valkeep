@@ -23,10 +23,15 @@ OFFICIAL = (sys.executable, "-I", str(FIXTURES / "official_stub.py"))
 async def test_pinned_official_contract_and_results(policy):
     async with connect_upstream(policy, command=OFFICIAL, environment={}) as upstream:
         assert upstream.extra_tools > 0
-        result = await upstream.call("type", {"key": "safe:a"})
+        result = await upstream.call(
+            "valkeep_read", {"request": json.dumps({"operation": "inspect_key", "key": "safe:a"})}
+        )
         assert decode_result("inspect_key", "safe:a", result) == {
             "type": "list",
-            "ttl_seconds": -1,
+            "ttl_ms": -1,
+            "length": 7,
+            "length_unit": "items",
+            "atomic": False,
         }
         result = await upstream.call("llen", {"name": "safe:a"})
         assert decode_result("list_length", "safe:a", result) == {"length": 7}
@@ -49,11 +54,11 @@ async def test_real_sync_worker_timeout_is_killed(policy):
 
 def test_changed_or_duplicate_schema_rejected():
     tool = types.Tool(
-        name="type",
+        name="valkeep_read",
         inputSchema={
             "type": "object",
-            "properties": {"key": {"type": "string"}},
-            "required": ["key"],
+            "properties": {"request": {"type": "string"}},
+            "required": ["request"],
         },
     )
     assert verify_contracts([tool], ("inspect_key",)) == 0

@@ -1,71 +1,80 @@
 # Valkeep
 
-운영 Redis를 AI 클라이언트에서 조사할 때, **읽기 전용 권한과 조회 정책을 강제하는 MCP 프록시**.
+여러 Redis를 AI 클라이언트에서 조사할 때 **읽기 전용 권한·조회 범위·호출 예산을 통제하는 로컬 MCP**.
 
-> 상태: 다중 target stdio 프록시 구현. `list_targets`와 조회 도구 `inspect_key`·`list_length`를 제공하며, 실제 Redis 연결·ACL·운영 부하 검증은 아직 수행하지 않았다. 구체적인 대상 환경과 운영 정책 수치는 미정이다.
-
-## 프로젝트 방향
+기본 프리셋은 메타데이터만 조회한다. 값 미리보기와 키 탐색은 필요할 때만 따로 켠다. 임의 Redis 명령 실행 기능은 제공하지 않는다.
 
 ```text
 AI 클라이언트
-  → Valkeep: target_id 선택 및 대상별 정책 검증
-    ├─ catalog-cache → 전용 공식 Redis MCP → 전용 ACL 계정 → Redis A
-    └─ job-queue     → 전용 공식 Redis MCP → 전용 ACL 계정 → Redis B
+  → Valkeep: target_id·도구·키 범위·호출 예산 검사
+    ├─ catalog-cache → 전용 공식 MCP + 안전 조회 어댑터 → ACL 계정 → Redis A
+    └─ job-queue     → 전용 공식 MCP + 안전 조회 어댑터 → ACL 계정 → Redis B
 ```
 
-공식 Redis MCP의 조회 기능을 재사용하되, 클라이언트에는 검토한 기능만 제공한다. 기본 정책은 **명시적으로 허용하지 않은 요청은 거절**이다.
+## 제공 기능
 
-- **데이터 변경 방지**: Redis ACL이 보안 경계이며, 도구 필터링은 추가 방어다.
-- **조회 부하 완화**: Valkeep이 대상별 호출 빈도, 동시 실행 수, 인자를 제한한다. 키 탐색 기능은 아직 제공하지 않는다.
-- **정보 노출 최소화**: 대상·키 범위를 제한하고 값·민감정보를 기본적으로 기록하지 않는다.
-- **명시적인 한계**: 읽기도 Redis 자원을 소비한다. 운영 무영향, 정확한 Redis CPU 예산, 실행 중인 명령의 강제 취소는 보장하지 않는다.
+| 도구 | 기능 | 기본 상태 |
+|---|---|---|
+| `list_targets` | 등록 대상·환경·허용 도구·탐색 scope 확인 | 제공 |
+| `inspect_key` | 타입·밀리초 TTL·타입별 길이/개수 | 제공 |
+| `list_length` | List 원소 수 | 제공 |
+| `connection_status` | PING 연결·인증 점검 | 제공 |
+| `preview_key` | String 앞부분의 제한된 바이트 조회 | 명시적으로 활성화 |
+| `find_keys` | 허용 prefix별 한 페이지 탐색·일회용 토큰·누적 예산 | 명시적으로 활성화 |
+
+모든 Redis 조회는 `target_id`를 명시해야 한다. 대상 생략·미등록 ID·허용 범위 밖 접근을 거절하며 다른 대상으로 자동 재시도하지 않는다.
+
+## 시작
+
+Python 3.12+, macOS/Linux, uv가 필요하다.
+
+```bash
+uv sync --locked
+uv run --locked valkeep --config config/policy.example.toml --check-config
+uv run --locked valkeep --config config/policy.example.toml --acl-plan
+```
+
+위 명령은 Redis에 접속하거나 권한을 변경하지 않는다. [설정 예시](config/policy.example.toml)를 복사한 뒤 대상·계정·허용 키 범위를 지정하고, 관리자가 ACL을 적용한 다음 사용한다.
+
+```text
+list_targets({})
+inspect_key({"target_id": "catalog-cache", "key": "example:catalog:42"})
+preview_key({"target_id": "catalog-cache", "key": "example:catalog:42"})
+find_keys({"target_id": "catalog-cache", "scope_id": "prefix-0"})
+```
+
+미리보기와 탐색은 target의 `features.value_preview`, `features.key_discovery`를 각각 true로 설정해야 사용할 수 있다. 프리셋은 `production-safe`이며, 고급 사용자는 명시적인 `tools`와 제한값을 지정할 수 있다.
+
+## 안전 경계
+
+- **변경 방지:** 프록시는 쓰기 도구를 거절한다. 실제 계정 권한은 Redis ACL로 제한해야 한다.
+- **부하 완화:** target별 호출률·동시 실행·메시지 크기·탐색 호출/시간/관측 예산을 적용한다. 큰 값을 GET으로 읽은 뒤 잘라내지 않는다.
+- **대상 격리:** 최대 16개의 target에 각각 프로세스·자격증명·정책·감사 로그를 분리한다.
+- **비밀정보 최소화:** 로그에 원본 키·값·비밀번호·탐색 토큰을 남기지 않는다.
+- **명시적 한계:** 읽기도 Redis 자원을 소비한다. SCAN COUNT는 정확한 바이트 상한이 아니며 운영 무영향을 보장하지 않는다.
+- **권한 검증 한계:** ACL 계획은 자동 적용하지 않는다. 관리자 export 검증은 입력 파일의 정책 일치 검사이며 현재 계정의 권한을 실시간 증명하지 않는다.
+
+현재 범위는 standalone Redis용 로컬 stdio다. HTTP 중앙 서비스·사용자별 권한·Cluster·Valkey 인증 지원은 포함하지 않는다.
+
+## 검증
+
+```bash
+uv run --locked pytest -q
+uv run --locked pytest -q -m live
+uv run --locked ruff check .
+uv build
+```
+
+단위·공식 MCP 통합 테스트와 함께, 설치된 `redis-server`·`openssl`로 임시 로컬 서버를 시작해 실제 ACL·TLS·큰 값·탐색을 검증한다. 테스트는 외부 Redis URL을 받지 않는다. 관련 실행 파일이 없으면 live 테스트는 skip되므로 배포 검증에서는 실행 여부를 확인한다.
+
+실제 운영 환경의 부하 허용치·서비스별 민감정보 범위는 별도 확인이 필요하다. 운영 Redis에는 개발 과정에서 접속하지 않았다.
 
 ## 문서
 
 | 문서 | 내용 |
 |---|---|
-| [요구사항](docs/requirements.md) | 목적, 범위, 기능·비기능 요구사항, 수용 기준, 미결정 사항 |
-| [설계](docs/design.md) | 구성 요소, MCP 처리 흐름, 정책 모델, 조회 안전성, 장애 처리, 검증·도입 계획 |
-| [구현·실행 안내](docs/implementation.md) | 현재 구현 범위, 설치·테스트·실행, ACL 준비 사항, 미구현·미검증 항목 |
+| [구현·실행 안내](docs/implementation.md) | 프리셋·설정·ACL 생성/검증·연결 점검·도구·한계 |
+| [요구사항](docs/requirements.md) | 목적, 기능·비기능 요구사항, 수용 기준 |
+| [설계](docs/design.md) | 구조, 정책, 수명 관리, 조회 및 탐색 안전성 |
 
-## 결정 상태
-
-### 대화에서 선택한 방향
-
-- Redis에 읽기 전용으로 접근한다.
-- 운영 조회 부하를 통제한다.
-- 공식 Redis MCP를 사용하고, 외부 정책 검증 계층을 둔다.
-
-### 초기 구현에서 선택한 사항
-
-- Python 3.12+ 및 MCP SDK 1.30.0, 공식 Redis MCP 0.5.1을 사용한다.
-- 하나의 로컬 `stdio` 프록시에 최대 16개의 target을 등록한다. 모든 조회에서 `target_id`를 필수로 받으며 기본 대상은 없다.
-- target별 공식 MCP 자식 프로세스·자격증명·키 범위·호출 예산·감사 로그를 분리하고, 업스트림은 직접 노출하지 않는다.
-- 위험한 전체 조회 도구를 차단하고, 안전성을 검토한 도구만 제공한다.
-- 값 미리보기처럼 공식 도구로 안전하게 구현하기 어려운 기능은 초기 범위에서 제외하거나 별도 어댑터로 추가한다.
-
-### 아직 미정
-
-- 개발/운영 환경, Redis/Valkey 및 버전, standalone/Cluster, managed service 여부.
-- 대상 데이터의 크기 특성, 값 조회 필요 여부, 허용 키 범위.
-- 실제 운영 배포 형태, 정책 제한값, 감사 로그 보관 정책.
-
-## target 사용 예
-
-설정은 `policy_version = 2`와 `[[targets]]` 목록을 사용한다. [실행 가능한 설정 예시](config/policy.example.toml)와 [이전 설정 마이그레이션](docs/implementation.md)을 참고한다.
-
-```text
-list_targets({})
-inspect_key({"target_id": "catalog-cache", "key": "example:catalog:42"})
-list_length({"target_id": "job-queue", "key": "example:jobs:pending"})
-```
-
-`target_id` 생략·미등록 ID는 거절한다. 한 target에서 실패해도 다른 target으로 자동 재시도하지 않는다.
-
-## 참고
-
-- [공식 Redis MCP](https://github.com/redis/mcp-redis)
-- [Redis ACL](https://redis.io/docs/latest/operate/oss_and_stack/management/security/acl/)
-- [Redis SCAN](https://redis.io/docs/latest/commands/scan/)
-
-공식 MCP의 `main` 코드를 조사한 결과를 설계의 출발점으로 사용했다. 초기 구현은 PyPI `redis-mcp-server==0.5.1`과 `uv.lock`의 배포 파일 해시를 기준으로 고정하고 두 도구의 스키마·출력 형식을 테스트했다. 실제 Redis 명령·ACL·부하는 별도 검증이 필요하다. Redis 호환 프로토콜을 사용한다는 이유만으로 Valkey 및 모든 managed service와의 호환성을 보장하지 않는다.
+공식 Redis MCP 0.5.1, MCP SDK 1.30.0, redis-py 8.1.0과 전이 의존성은 `uv.lock`으로 고정한다. 조회 어댑터를 추가해도 공식 서버의 다른 도구가 자동 노출되지는 않는다.

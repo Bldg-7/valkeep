@@ -41,10 +41,11 @@ class Router:
                 "enum": [proxy.policy.target.id for proxy in candidates],
                 "description": "조회할 target ID. 기본값이나 자동 대체 대상은 없습니다.",
             }
-            tool.inputSchema["properties"]["key"]["maxLength"] = max(
-                proxy.policy.limits.max_key_bytes for proxy in candidates
-            )
-            tool.inputSchema["required"] = ["target_id", "key"]
+            if "key" in tool.inputSchema["properties"]:
+                tool.inputSchema["properties"]["key"]["maxLength"] = max(
+                    proxy.policy.limits.max_key_bytes for proxy in candidates
+                )
+            tool.inputSchema["required"] = ["target_id", *tool.inputSchema["required"]]
             tools.append(tool)
         return tools
 
@@ -74,7 +75,12 @@ class Router:
                     {
                         "id": target.id,
                         "environment": target.environment,
-                        "tools": list(target.tools),
+                        "tools": list(target.effective_tools),
+                        "discovery_scopes": (
+                            list(proxy.scans.scopes)
+                            if "find_keys" in target.effective_tools
+                            else []
+                        ),
                         "status": "unavailable" if unavailable else "contract_verified",
                     }
                 )

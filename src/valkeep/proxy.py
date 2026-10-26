@@ -12,6 +12,8 @@ from valkeep.config import Policy
 from valkeep.contracts import MAPPING, decode_result
 from valkeep.errors import Code, Rejected
 from valkeep.limiter import Limiter
+from valkeep.operations import public_tools
+from valkeep.scans import Scans, ScanState
 from valkeep.upstream import Upstream
 
 
@@ -35,42 +37,31 @@ class Proxy:
         self.limiter = Limiter(policy.limits)
         self.tasks: set[asyncio.Task] = set()
         self.closed = False
+        self.scans = Scans(policy)
 
     def tools(self) -> list[types.Tool]:
-        descriptions = {
-            "inspect_key": "허용된 키의 타입과 TTL만 조회합니다. 두 값은 원자적 관측이 아닙니다.",
-            "list_length": "허용된 List의 길이만 조회합니다. 값이나 원소는 읽지 않습니다.",
-        }
-        return [
-            types.Tool(
-                name=name,
-                description=descriptions[name],
-                inputSchema={
-                    "type": "object",
-                    "properties": {
-                        "key": {
-                            "type": "string",
-                            "minLength": 1,
-                            "maxLength": self.policy.limits.max_key_bytes,
-                        }
-                    },
-                    "required": ["key"],
-                    "additionalProperties": False,
-                },
-                annotations=types.ToolAnnotations(
-                    readOnlyHint=True,
-                    destructiveHint=False,
-                    idempotentHint=True,
-                    openWorldHint=False,
-                ),
-            )
-            for name in self.policy.tools
-        ]
+        return public_tools(self.policy)
 
-    def validate(self, name: str, arguments: dict | None) -> str:
+    def validate(self, name: str, arguments: dict | None) -> dict:
         if name not in self.policy.tools:
             raise Rejected(Code.TOOL_DENIED)
-        if type(arguments) is not dict or set(arguments) != {"key"}:
+        if type(arguments) is not dict:
+            raise Rejected(Code.INVALID_ARGUMENT)
+        if name == "connection_status":
+            if arguments:
+                raise Rejected(Code.INVALID_ARGUMENT)
+            return arguments
+        if name == "find_keys":
+            if set(arguments) not in ({"scope_id"}, {"scope_id", "token"}):
+                raise Rejected(Code.INVALID_ARGUMENT)
+            scope, token = arguments["scope_id"], arguments.get("token")
+            if type(scope) is not str or (
+                "token" in arguments and (type(token) is not str or not 1 <= len(token) <= 128)
+            ):
+                raise Rejected(Code.INVALID_ARGUMENT)
+            self.scans.validate(scope, token)
+            return arguments
+        if set(arguments) != {"key"}:
             raise Rejected(Code.INVALID_ARGUMENT)
         key = arguments["key"]
         if type(key) is not str or not key:
@@ -84,7 +75,7 @@ class Proxy:
             key.startswith(prefix) for prefix in self.policy.allowed_prefixes
         ):
             raise Rejected(Code.KEY_SCOPE_DENIED)
-        return key
+        return arguments
 
     def _emit(self, *args, **kwargs) -> bool:
         try:
@@ -97,7 +88,7 @@ class Proxy:
     async def execute(self, name: str, arguments: dict | None) -> types.CallToolResult:
         request_id = uuid.uuid4().hex
         try:
-            key = self.validate(name, arguments)
+            arguments = self.validate(name, arguments)
             if self.audit.failed:
                 raise Rejected(Code.AUDIT_UNAVAILABLE)
             if self.closed or self.upstream.failed:
@@ -112,7 +103,16 @@ class Proxy:
             self.limiter.release()
             return failure(Code.AUDIT_UNAVAILABLE)
 
-        worker = asyncio.create_task(self._run(request_id, name, key))
+        state = None
+        try:
+            if name == "find_keys":
+                state = self.scans.begin(arguments["scope_id"], arguments.get("token"))
+        except Rejected as exc:
+            self.limiter.release()
+            if not self._emit("rejected", request_id, name, exc.code.value):
+                return failure(Code.AUDIT_UNAVAILABLE)
+            return failure(exc.code)
+        worker = asyncio.create_task(self._run(request_id, name, arguments, state))
         self.tasks.add(worker)
         worker.add_done_callback(self.tasks.discard)
         try:
@@ -127,10 +127,29 @@ class Proxy:
             self._emit("response_cancelled", request_id, name, "CANCELLED")
             raise
 
-    async def _run(self, request_id: str, name: str, key: str) -> types.CallToolResult:
+    async def _run(
+        self, request_id: str, name: str, arguments: dict, state: ScanState | None
+    ) -> types.CallToolResult:
         started = time.monotonic()
         upstream_name, argument = MAPPING[name]
-        call = asyncio.create_task(self.upstream.call(upstream_name, {argument: key}))
+        if name == "list_length":
+            forwarded = {argument: arguments["key"]}
+        else:
+            request = {"operation": name, **arguments}
+            if name == "preview_key":
+                request["limit"] = self.policy.limits.preview_bytes
+            if state is not None:
+                request = {
+                    "operation": name,
+                    "prefix": state.prefix,
+                    "cursor": state.cursor,
+                    "count": min(
+                        self.policy.limits.scan_count_hint,
+                        max(1, self.policy.limits.scan_observations - state.observed),
+                    ),
+                }
+            forwarded = {argument: json.dumps(request, ensure_ascii=True)}
+        call = asyncio.create_task(self.upstream.call(upstream_name, forwarded))
         result = failure(Code.UPSTREAM_UNAVAILABLE)
         code = Code.UPSTREAM_UNAVAILABLE.value
         try:
@@ -146,27 +165,61 @@ class Proxy:
                 await asyncio.gather(call, return_exceptions=True)
                 raise Rejected(Code.TIMEOUT)
             raw = call.result()
-            data = decode_result(name, key, raw)
+            data = decode_result(name, arguments.get("key", ""), raw)
+            if name == "preview_key" and data["returned_bytes"] > self.policy.limits.preview_bytes:
+                raise Rejected(Code.UPSTREAM_CONTRACT_MISMATCH)
+            if state is not None:
+                data = self.scans.finish(state, data)
             result = response(
                 {
                     "data": data,
                     "meta": {
                         "target_id": self.policy.target.id,
-                        "partial": False,
-                        "truncated": False,
+                        "partial": data.get("partial", data.get("truncated", False)),
+                        "truncated": data.get("truncated", False),
                         "upstream_calls": 1,
                     },
                 }
             )
+            if state is not None and len(result.model_dump_json(by_alias=True).encode()) > (
+                self.policy.limits.max_response_bytes
+            ):
+                self.scans.abort(state)
+                data.update(
+                    truncated=True, partial=True, next_token=None, stop_reason="response_size"
+                )
+                while True:
+                    result = response(
+                        {
+                            "data": data,
+                            "meta": {
+                                "target_id": self.policy.target.id,
+                                "partial": True,
+                                "truncated": True,
+                                "upstream_calls": 1,
+                            },
+                        }
+                    )
+                    if (
+                        len(result.model_dump_json(by_alias=True).encode())
+                        <= (self.policy.limits.max_response_bytes)
+                        or not data["keys"]
+                    ):
+                        break
+                    data["keys"].pop()
             if len(result.model_dump_json(by_alias=True).encode()) > (
                 self.policy.limits.max_response_bytes
             ):
                 raise Rejected(Code.RESPONSE_TOO_LARGE)
             code = "OK"
         except Rejected as exc:
+            if state is not None:
+                self.scans.abort(state)
             result = failure(exc.code)
             code = exc.code.value
         except Exception:
+            if state is not None:
+                self.scans.abort(state)
             result = failure(Code.UPSTREAM_UNAVAILABLE)
         finally:
             if not call.done():

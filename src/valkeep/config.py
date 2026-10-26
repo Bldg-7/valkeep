@@ -12,7 +12,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from valkeep.errors import Code, Rejected
 
 Identifier = Annotated[str, Field(pattern=r"^[a-zA-Z0-9_-]{1,64}$")]
-PublicTool = Literal["inspect_key", "list_length"]
+PublicTool = Literal["inspect_key", "list_length", "preview_key", "find_keys", "connection_status"]
 
 
 class FrozenModel(BaseModel):
@@ -49,12 +49,19 @@ class Limits(FrozenModel):
     requests_per_second: Annotated[float, Field(gt=0, le=100, allow_inf_nan=False)] = 1.0
     burst: Annotated[int, Field(ge=1, le=100)] = 1
     max_request_bytes: Annotated[int, Field(ge=1024, le=65536)] = 8192
-    max_response_bytes: Annotated[int, Field(ge=512, le=65536)] = 8192
+    max_response_bytes: Annotated[int, Field(ge=512, le=65536)] = 16384
     max_upstream_frame_bytes: Annotated[int, Field(ge=65536, le=4194304)] = 1048576
     max_key_bytes: Annotated[int, Field(ge=1, le=4096)] = 512
     response_timeout_seconds: Annotated[float, Field(gt=0, le=60, allow_inf_nan=False)] = 3.0
     cleanup_timeout_seconds: Annotated[float, Field(gt=0, le=60, allow_inf_nan=False)] = 5.0
     startup_timeout_seconds: Annotated[float, Field(gt=0, le=120, allow_inf_nan=False)] = 15.0
+    redis_timeout_seconds: Annotated[float, Field(ge=0.05, le=30, allow_inf_nan=False)] = 2.0
+    preview_bytes: Annotated[int, Field(ge=1, le=4096)] = 1024
+    scan_count_hint: Annotated[int, Field(ge=1, le=100)] = 100
+    scan_calls: Annotated[int, Field(ge=1, le=100)] = 10
+    scan_observations: Annotated[int, Field(ge=1, le=5000)] = 500
+    scan_ttl_seconds: Annotated[float, Field(ge=0.05, le=300, allow_inf_nan=False)] = 60.0
+    scan_sessions: Annotated[int, Field(ge=1, le=16)] = 4
 
 
 class Policy(FrozenModel):
@@ -62,7 +69,7 @@ class Policy(FrozenModel):
     target: Target
     allowed_prefixes: Annotated[tuple[str, ...], Field(strict=False, max_length=100)] = ()
     allowed_keys: Annotated[tuple[str, ...], Field(strict=False, max_length=100)] = ()
-    tools: Annotated[tuple[PublicTool, ...], Field(strict=False, min_length=1, max_length=2)]
+    tools: Annotated[tuple[PublicTool, ...], Field(strict=False, min_length=1, max_length=5)]
     limits: Limits = Field(default_factory=Limits)
     audit_path: Annotated[str, Field(min_length=1)]
 
@@ -73,6 +80,8 @@ class Policy(FrozenModel):
         for key in (*self.allowed_prefixes, *self.allowed_keys):
             if not key or len(key.encode("utf-8")) > self.limits.max_key_bytes:
                 raise ValueError("키 범위가 올바르지 않습니다")
+        if "find_keys" in self.tools and not self.allowed_prefixes:
+            raise ValueError("키 탐색에는 허용 prefix가 필요합니다")
         if len(self.tools) != len(set(self.tools)):
             raise ValueError("도구가 중복되었습니다")
         return self
@@ -83,22 +92,66 @@ class Policy(FrozenModel):
         return hashlib.sha256(payload.encode()).hexdigest()[:16]
 
 
+class Features(FrozenModel):
+    value_preview: bool = False
+    key_discovery: bool = False
+
+
 class TargetEntry(Target):
     """외부 설정의 한 target을 기존 단일 대상 실행 정책으로 변환한다."""
 
     allowed_prefixes: Annotated[tuple[str, ...], Field(strict=False, max_length=100)] = ()
     allowed_keys: Annotated[tuple[str, ...], Field(strict=False, max_length=100)] = ()
-    tools: Annotated[tuple[PublicTool, ...], Field(strict=False, min_length=1, max_length=2)]
+    preset: Literal["production-safe", "custom"] = "production-safe"
+    features: Features = Field(default_factory=Features)
+    tools: Annotated[
+        tuple[PublicTool, ...] | None, Field(strict=False, min_length=1, max_length=5)
+    ] = None
     limits: Limits = Field(default_factory=Limits)
     audit_path: Annotated[str, Field(min_length=1)]
+
+    @model_validator(mode="before")
+    @classmethod
+    def infer_legacy_custom(cls, values):
+        if isinstance(values, dict) and values.get("tools") is not None and "preset" not in values:
+            return {**values, "preset": "custom"}
+        return values
+
+    @property
+    def effective_tools(self) -> tuple[PublicTool, ...]:
+        if self.tools is not None:
+            return self.tools
+        tools: list[PublicTool] = ["inspect_key", "list_length", "connection_status"]
+        if self.features.value_preview:
+            tools.append("preview_key")
+        if self.features.key_discovery:
+            tools.append("find_keys")
+        return tuple(tools)
 
     def as_policy(self) -> Policy:
         values = self.model_dump()
         connection = {name: values.pop(name) for name in Target.model_fields}
+        values.pop("preset")
+        values.pop("features")
+        values["tools"] = self.effective_tools
         return Policy.model_validate({"policy_version": 2, "target": connection, **values})
 
     @model_validator(mode="after")
     def check_policy(self):
+        if self.preset == "production-safe" and self.tools is not None:
+            raise ValueError("production-safe에서는 tools 대신 features를 사용해야 합니다")
+        if self.tools is not None and (self.features.value_preview or self.features.key_discovery):
+            raise ValueError("명시적 tools와 features를 함께 지정할 수 없습니다")
+        if self.preset == "custom" and self.tools is None:
+            raise ValueError("custom 프리셋에는 tools를 명시해야 합니다")
+        if self.tools is None and (
+            self.limits.max_inflight != 1
+            or self.limits.requests_per_second > 2
+            or self.limits.burst > 2
+            or self.limits.scan_calls > 20
+            or self.limits.scan_observations > 1000
+        ):
+            raise ValueError("production-safe 프리셋의 제한 상한을 초과했습니다")
         self.as_policy()
         return self
 
@@ -172,6 +225,7 @@ def upstream_environment(policy: Policy) -> dict[str, str]:
         "REDIS_CLUSTER_MODE": "false",
         "MCP_REDIS_LOG_LEVEL": "CRITICAL",
         "MCP_DOCS_SEARCH_URL": "",
+        "VALKEEP_POLICY": policy.model_dump_json(),
     }
     if target.ca_file:
         env["REDIS_SSL_CA_CERTS"] = target.ca_file

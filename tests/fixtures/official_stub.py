@@ -30,10 +30,19 @@ class FixtureRedis:
     def ttl(self, key):
         return -1
 
+    def pttl(self, key):
+        return -1
+
+    def ping(self):
+        return True
+
     def llen(self, name):
         return int(os.environ.get("FIXTURE_LENGTH", "7"))
 
 
 RedisConnectionManager.get_connection = classmethod(lambda cls, **kwargs: FixtureRedis())
 print("upstream-private-secret", file=sys.stderr)
+from valkeep.reader import register  # noqa: E402
+
+register(FixtureRedis())
 main()
