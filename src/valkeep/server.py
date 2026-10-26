@@ -3,10 +3,10 @@
 from mcp.server.lowlevel import Server
 
 from valkeep import __version__
-from valkeep.proxy import Proxy
+from valkeep.router import Router
 
 
-def build_server(proxy: Proxy) -> Server:
+def build_server(proxy: Router) -> Server:
     server = Server("valkeep", version=__version__)
 
     @server.list_tools()

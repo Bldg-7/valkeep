@@ -42,11 +42,12 @@ def test_bad_configuration_is_sanitized(tmp_path):
 
 def test_missing_password_fails_before_upstream(tmp_path):
     text = (ROOT / "config/policy.example.toml").read_text()
-    text = text.replace("../valkeep.audit.jsonl", "audit.jsonl")
+    text = text.replace("../valkeep.", "valkeep.")
     path = tmp_path / "policy.toml"
     path.write_text(text)
     env = dict(os.environ)
-    env.pop("VALKEEP_REDIS_PASSWORD", None)
+    env.pop("VALKEEP_CATALOG_PASSWORD", None)
+    env.pop("VALKEEP_QUEUE_PASSWORD", None)
     result = subprocess.run(
         [sys.executable, "-m", "valkeep.cli", "--config", str(path)],
         env=env,

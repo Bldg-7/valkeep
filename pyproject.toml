@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "valkeep"
-version = "0.1.0"
+version = "0.2.0"
 description = "운영 Redis 조회 정책을 강제하는 읽기 전용 MCP 프록시"
 requires-python = ">=3.12"
 dependencies = [

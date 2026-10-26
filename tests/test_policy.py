@@ -8,7 +8,7 @@ import pytest
 from pydantic import ValidationError
 
 from valkeep.audit import Audit
-from valkeep.config import Policy, load_policy, upstream_environment
+from valkeep.config import Policy, load_config, upstream_environment
 from valkeep.errors import Code, Rejected
 from valkeep.limiter import Limiter
 from valkeep.proxy import Proxy
@@ -156,5 +156,5 @@ def test_settings_errors_do_not_expose_values(tmp_path):
     path = tmp_path / "bad.toml"
     path.write_text('password = "never-show-this"')
     with pytest.raises(Rejected) as exc:
-        load_policy(path)
+        load_config(path)
     assert str(exc.value) == "CONFIG_INVALID"

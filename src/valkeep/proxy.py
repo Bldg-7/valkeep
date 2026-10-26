@@ -148,7 +148,15 @@ class Proxy:
             raw = call.result()
             data = decode_result(name, key, raw)
             result = response(
-                {"data": data, "meta": {"partial": False, "truncated": False, "upstream_calls": 1}}
+                {
+                    "data": data,
+                    "meta": {
+                        "target_id": self.policy.target.id,
+                        "partial": False,
+                        "truncated": False,
+                        "upstream_calls": 1,
+                    },
+                }
             )
             if len(result.model_dump_json(by_alias=True).encode()) > (
                 self.policy.limits.max_response_bytes

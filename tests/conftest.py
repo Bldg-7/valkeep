@@ -6,7 +6,7 @@ import json
 import pytest
 from mcp import types
 
-from valkeep.config import Policy
+from valkeep.config import Policy, ServerConfig
 from valkeep.errors import Code, Rejected
 
 
@@ -41,6 +41,7 @@ def policy(tmp_path):
 class FakeUpstream:
     def __init__(self):
         self.failed = False
+        self.extra_tools = 0
         self.calls = []
         self.gate = asyncio.Event()
         self.gate.set()
@@ -71,3 +72,36 @@ class FakeUpstream:
 @pytest.fixture
 def upstream():
     return FakeUpstream()
+
+
+@pytest.fixture
+def config(policy, tmp_path):
+    base = policy.model_dump(exclude={"target", "policy_version"})
+    a = {
+        **base,
+        **policy.target.model_dump(),
+        "id": "catalog",
+        "port": 6379,
+        "password_env": "CATALOG_PASSWORD",
+        "audit_path": str(tmp_path / "catalog.jsonl"),
+        "allowed_prefixes": ["catalog:"],
+        "allowed_keys": [],
+        "tools": ["inspect_key"],
+    }
+    b = {
+        **base,
+        **policy.target.model_dump(),
+        "id": "queue",
+        "port": 6380,
+        "password_env": "QUEUE_PASSWORD",
+        "audit_path": str(tmp_path / "queue.jsonl"),
+        "allowed_prefixes": ["queue:"],
+        "allowed_keys": [],
+    }
+    return ServerConfig.model_validate(
+        {
+            "policy_version": 2,
+            "targets": [a, b],
+            "audit_path": str(tmp_path / "router.jsonl"),
+        }
+    )

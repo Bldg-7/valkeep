@@ -66,11 +66,12 @@ def test_changed_or_duplicate_schema_rejected():
 
 def write_policy(path):
     path.write_text(
-        "policy_version = 1\n"
+        "policy_version = 2\n"
+        'audit_path = "router.jsonl"\n'
+        "[[targets]]\n"
         'tools = ["inspect_key", "list_length"]\n'
         'allowed_prefixes = ["safe:"]\n'
         'audit_path = "audit.jsonl"\n'
-        "[target]\n"
         'id = "fixture"\n'
         'environment = "local"\n'
         'host = "127.0.0.1"\n'
@@ -78,7 +79,7 @@ def write_policy(path):
         'password_env = "IGNORED"\n'
         "tls = false\n"
         "readonly_acl_confirmed = true\n"
-        "[limits]\n"
+        "[targets.limits]\n"
         "requests_per_second = 100.0\n"
         "burst = 100\n"
     )
@@ -100,14 +101,20 @@ async def test_public_stdio_capabilities_and_denials(tmp_path):
                 assert initialized.capabilities.prompts is None
                 assert initialized.capabilities.logging is None
                 listed = await session.list_tools()
-                assert {t.name for t in listed.tools} == {"inspect_key", "list_length"}
+                assert {t.name for t in listed.tools} == {
+                    "list_targets",
+                    "inspect_key",
+                    "list_length",
+                }
                 denied = await session.call_tool("delete", {"key": "safe:a"})
                 assert denied.structuredContent["error"]["code"] == "TOOL_DENIED"
                 invalid = await session.call_tool(
                     "inspect_key", {"key": "safe:private", "password": "hidden"}
                 )
                 assert invalid.structuredContent["error"]["code"] == "INVALID_ARGUMENT"
-                allowed = await session.call_tool("inspect_key", {"key": "safe:a"})
+                allowed = await session.call_tool(
+                    "inspect_key", {"target_id": "fixture", "key": "safe:a"}
+                )
                 assert allowed.structuredContent["data"]["type"] == "list"
                 with pytest.raises(McpError):
                     await session.list_resources()
@@ -131,7 +138,7 @@ async def test_real_cli_initializes_without_redis(tmp_path):
             initialized = await session.initialize()
             assert initialized.serverInfo.name == "valkeep"
             listed = await session.list_tools()
-            assert len(listed.tools) == 2
+            assert len(listed.tools) == 3
     events = [json.loads(line) for line in (tmp_path / "audit.jsonl").read_text().splitlines()]
     assert events[0]["code"] == "CONTRACT_VERIFIED"
     assert events[0]["ignored_tools"] > 0

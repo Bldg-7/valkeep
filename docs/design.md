@@ -4,7 +4,7 @@
 
 ## 1. 설계 요약
 
-**공식 Redis MCP를 자식 프로세스로 실행하는 정책 프록시**를 초기 배포안으로 제안한다. 클라이언트에는 Valkeep만 등록하고, 공식 MCP는 외부에 노출하지 않는다.
+**target마다 공식 Redis MCP를 별도 자식 프로세스로 실행하는 다중 대상 정책 프록시**를 사용한다. 클라이언트에는 Valkeep만 등록하고, 공식 MCP는 외부에 노출하지 않는다.
 
 프록시는 단순한 도구 목록 필터가 아니다. 실제 호출에서 대상·도구·인자·조회 예산을 검사하고, 결과와 오류도 정책에 맞게 변환한다.
 
@@ -19,12 +19,10 @@ Valkeep
    ├─ 결과 변환: 크기 제한, 부분 결과, 오류 정제
    ├─ 감사: 값 없는 구조화 로그
    │
-   └─ 업스트림 어댑터 / 전용 stdio
-          ▼
-      공식 Redis MCP 자식 프로세스
-          │ 검증된 TLS 연결 및 최소 권한 ACL
-          ▼
-         Redis
+   ├─ target A: 전용 수명 태스크·정책·limiter·감사
+   │     └─ 공식 Redis MCP 자식 A → ACL 계정 A → Redis A
+   └─ target B: 전용 수명 태스크·정책·limiter·감사
+         └─ 공식 Redis MCP 자식 B → ACL 계정 B → Redis B
 ```
 
 별도 어댑터가 필요한 안전한 값 미리보기는 선택적 후속 범위다. 첫 버전부터 범용 Redis 실행 경로를 추가하지 않는다.
@@ -36,7 +34,7 @@ Valkeep
 | 기본 거부 도구 허용 목록 | 신규 도구·임의 이름 호출을 차단 | 도구 추가 시 검토 필요 |
 | 공개 스키마와 업스트림 스키마 분리 | 공개 API에서 위험한 인자를 제거 | 명시적 매핑·호환성 테스트 필요 |
 | 공식 서버 버전 고정 | 업데이트에 따른 정책 우회 방지 | 보안 업데이트를 검증 후 반영 |
-| 한 프로세스에 한 대상 | 자격증명·제한·탐색 상태 격리 | 여러 대상은 별도 프로세스로 운영 |
+| 한 프록시에 여러 target, target당 별도 자식 | 자격증명·제한·수명 격리 | 최대 16개, 모든 조회에 target_id 필수 |
 | 제한된 stdio 기능만 제공 | 네트워크 인증·멀티테넌트 복잡성 축소 | 중앙 서비스는 별도 설계 |
 | 위험한 조회는 우선 차단 | 사후 응답 절단만으로는 Redis 부하를 줄이지 못함 | 일부 값 조회 기능 감소 |
 | Redis ACL과 프록시 정책 병행 | 프록시 오류가 곧 쓰기 허용으로 이어지지 않게 함 | ACL은 빈도·인자·SCAN 탐색량을 제한하지 못함 |
@@ -52,14 +50,23 @@ Valkeep
 - 검토한 capability만 광고하며 업스트림 capability를 그대로 복제하지 않는다.
 - stdio stdout은 MCP 프레임 전용이다. 로그는 별도 출력으로 분리한다.
 
-### 3.2 정책 엔진
+### 3.2 대상 라우터와 수명 관리자
+
+- `list_targets`와 target별 허용 도구의 합집합을 공개한다. 개별 도구의 `target_id` enum에는 해당 도구가 허용된 대상만 넣는다.
+- 실제 호출에서도 ID·도구·키 정책을 재검사한다. schema나 UI 필터만 신뢰하지 않는다.
+- 기본 target, 실행 중 연결 설정 변경, 다른 target으로의 자동 재시도는 없다.
+- target마다 별도 asyncio 태스크가 MCP ClientSession과 자식 프로세스의 생성·종료를 소유한다. 여러 세션의 취소 범위를 하나의 수명 태스크에 중첩하지 않는다.
+- target마다 독립 Proxy·limiter·감사 파일을 사용한다. 라우터 감사 파일은 target 식별 전의 거절과 목록·분기 이벤트를 기록한다.
+- 하나의 target만 실패하면 해당 target을 사용 불가로 표시한다. 공통 감사 실패는 모든 새 조회를 차단한다.
+
+### 3.3 정책 엔진
 
 - 불변 설정을 로드하고 정규화한다.
 - 도구 허용 목록, 대상, 키 범위, 입력 길이와 범위를 검사한다.
 - 검증 성공 시에만 구체적인 업스트림 호출 계획을 생성한다.
 - 클라이언트가 주는 URL·파일 경로·계정·임의 Redis 명령을 연결 설정으로 사용하지 않는다.
 
-### 3.3 실행 제어기
+### 3.4 실행 제어기
 
 - 대상별 token bucket 등으로 rate limit을 적용한다.
 - 대상별 실행 슬롯으로 동시 업스트림 호출 수를 제한한다.
@@ -68,7 +75,7 @@ Valkeep
 - 초기 도구는 내부 호출 수를 검토 가능한 범위로 제한하고 전체 순회 도구를 금지한다.
 - 프로세스별 limiter는 여러 인스턴스의 합산 트래픽을 통제하지 못한다. 초기에는 같은 대상을 향한 인스턴스 수를 관리하고, 수평 확장 시 공유 limiter를 설계한다.
 
-### 3.4 업스트림 어댑터
+### 3.5 업스트림 어댑터
 
 - 공식 Redis MCP를 고정된 실행 파일·버전으로 시작한다.
 - 자식 프로세스 환경은 필요한 값만 전달하며 자격증명을 명령행 인자에 넣지 않는다.
@@ -77,7 +84,7 @@ Valkeep
 - 업스트림이 오류를 일반 문자열로 반환하는 경우도 있으므로 도구별 검증된 응답 계약으로 정상·오류를 구분한다. 알 수 없는 응답은 성공으로 추정하지 않는다.
 - 프레임 크기 제한을 적용할 수 있는 SDK/transport를 선택한다. 초과 시 처리 중단과 프로세스 정리를 수행하되, 이미 발생한 Redis 읽기 비용을 되돌릴 수는 없다.
 
-### 3.5 결과 및 감사 처리
+### 3.6 결과 및 감사 처리
 
 - 반환 항목 수·직렬화 후 UTF-8 바이트 수를 제한한다.
 - 크기 제한은 프레임을 임의 바이트로 잘라 JSON을 손상시키는 방식이 아니라, 구조화된 결과를 축소하여 적용한다.
@@ -90,9 +97,9 @@ Valkeep
 
 1. 설정을 검증하고 정책 버전 식별자를 생성한다.
 2. 필수 제한값 누락·모순이 있으면 시작을 거절한다.
-3. 공식 MCP 자식 프로세스를 시작한다.
-4. 업스트림 초기화와 필수 도구 계약 검사를 수행한다.
-5. 검증된 공개 도구만 노출하고 준비 완료 상태가 된다.
+3. 모든 target의 자격증명 존재를 확인한 후 target별 공식 MCP 자식 프로세스를 시작한다.
+4. 각 업스트림의 초기화와 필수 도구 계약 검사를 수행한다. 하나라도 실패하면 시작한 대상을 모두 정리한다.
+5. 모두 검증되면 공개 MCP를 시작한다. 실행 중에는 target별 실패를 격리한다.
 
 Redis 연결이 지연 생성되는 업스트림에서는 도구 계약 검사 성공과 Redis 접속 성공을 구분한다. 연결 점검은 명시적으로 허용한 안전한 방법으로 수행하고, 업스트림 초기화만으로 Redis 정상 상태를 보고하지 않는다.
 
@@ -100,7 +107,7 @@ Redis 연결이 지연 생성되는 업스트림에서는 도구 계약 검사 �
 
 1. 요청 크기와 MCP 메서드를 검증한다.
 2. 도구 허용 목록과 공개 입력 스키마를 검사한다.
-3. 키 범위, 범위 인자, 탐색 토큰과 예산을 검사한다.
+3. 명시적인 target ID로 대상을 선택하고, 그 대상의 키 범위·범위 인자·탐색 토큰·예산을 검사한다.
 4. rate limit·동시 실행 슬롯을 원자적으로 확보한다.
 5. 감사 시작 기록 후 검증된 인자만 업스트림에 전달한다.
 6. 응답 계약을 검사하고 결과 크기·마스킹·부분 결과 정책을 적용한다.
@@ -125,7 +132,8 @@ Redis 연결이 지연 생성되는 업스트림에서는 도구 계약 검사 �
 
 | 공개 기능 | 공식 도구 매핑 | 초기 정책 | 비고 |
 |---|---|---|---|
-| `inspect_key` | `type` | 활성화 후보 | 조사 당시 TYPE·TTL 실행. 원자적 결과는 아님 |
+| `list_targets` | 없음 | 항상 제공 | 등록된 대상 메타데이터만 조회, Redis 호출 없음 |
+| `inspect_key` | `type` | target별 선택 | 조사 당시 TYPE·TTL 실행. 원자적 결과는 아님 |
 | `scan_keys_page` | `scan_keys` | 조건부 활성화 | SCAN의 비용·키 이름 노출을 허용할 때만 사용 |
 | `list_length` | `llen` | 활성화 후보 | 결과가 작고 명령 비용을 예측하기 쉬움 |
 | `read_list_page` | `lrange` | 기본 비활성화 | 개수·offset 제한과 원소 크기 검토 필요 |
@@ -185,43 +193,48 @@ Hash 필드·List 원소·Sorted Set member는 문자열 미리보기와 같은 
 
 ## 6. 정책 설정 모델
 
-설정은 프로세스 소유이며 도구 호출로 변경할 수 없다. 다음은 **정책 구조 설명용 예시**이지 검증된 실행 설정이 아니다.
+설정은 프로세스 소유이며 도구 호출로 변경할 수 없다. 외부 설정은 TOML v2이며, 완전한 두 대상 예시는 [policy.example.toml](../config/policy.example.toml)에 있다.
 
-```yaml
-policy_version: 1
+```toml
+policy_version = 2
+audit_path = "router.audit.jsonl"
 
-target:
-  id: redis-diagnostics
-  topology: standalone
-  credentials_ref: operator-managed-secret
+[[targets]]
+id = "catalog-cache"
+environment = "local"
+host = "127.0.0.1"
+port = 6379
+username = "catalog_reader"
+password_env = "CATALOG_REDIS_PASSWORD"
+tls = false
+readonly_acl_confirmed = true
+allowed_prefixes = ["example:catalog:"]
+tools = ["inspect_key", "list_length"]
+audit_path = "catalog.audit.jsonl"
 
-key_scopes:
-  - id: approved-cache
-    literal_prefix: "example:cache:"
+[targets.limits]
+max_inflight = 1
+requests_per_second = 1.0
 
-tools:
-  inspect_key: true
-  list_length: true
-  scan_keys_page: false
-  read_list_page: false
-  read_sorted_set_page: false
-
-limits:
-  max_inflight: 1
-  requests_per_second: 1
-  burst: 1
-  max_request_bytes: 8192
-  max_response_bytes: 32768
-  max_active_scan_sessions: 4
-  scan_count_hint_max: 100
-  scan_calls_per_session: 10
-  scan_observed_keys_per_session: 500
-  scan_session_ttl_seconds: 60
-  range_items_max: 50
-  range_start_max: 1000
+[[targets]]
+id = "job-queue"
+environment = "local"
+host = "127.0.0.1"
+port = 6380
+username = "queue_reader"
+password_env = "QUEUE_REDIS_PASSWORD"
+tls = false
+readonly_acl_confirmed = true
+allowed_prefixes = ["example:jobs:"]
+tools = ["list_length"]
+audit_path = "queue.audit.jsonl"
 ```
 
-위 수치는 부하 테스트 전의 보수적 예시이며 운영 권장값으로 확정하지 않는다. 키·문자열 길이, 프레임 상한, 응답 deadline, 업스트림 정리 시간 등 추가 필수 설정은 구현 시 설정 스키마에 정의한다. `credentials_ref`의 해결 방식과 secret provider도 미정이며, MCP 인자로 비밀값을 받지 않는다는 계약만 나타낸다.
+target별 설정은 서로 상속하지 않는다. 생략한 제한값만 보수적인 기본값을 사용한다. 허용 키 범위·도구·접속 대상·계정·ACL 확인 선언은 명시해야 한다. 위 수치는 부하 테스트 전 예시이며 운영 권장값으로 확정하지 않는다.
+
+최상위 입력·응답 상한은 공통 MCP 연결을 보호하고, target별 제한은 각 대상의 조회를 보호한다. target 수를 최대 16개로 제한한다. 동일 endpoint/DB의 직접 중복 등록은 거절하지만 DNS 별칭·서로 다른 DB의 물리 Redis 공유까지 자동 감지하지는 않는다.
+
+SCAN의 페이지·시간·관측 키 수 및 토큰 정책은 향후 기능이다. 현재 설정에서 미구현 도구나 탐색 제한 필드를 지정하면 거절한다.
 
 ## 7. 결과와 오류 계약
 
@@ -247,7 +260,9 @@ limits:
 - `stop_reason`: 페이지 반환, 탐색 완료, 예산 소진, 크기 초과 등의 사유.
 - `next_token`: 안전하게 이어서 조회할 수 있을 때만 제공한다.
 
-오류는 `TOOL_DENIED`, `INVALID_ARGUMENT`, `KEY_SCOPE_DENIED`, `RATE_LIMITED`, `BUSY`, `SCAN_BUDGET_EXCEEDED`, `CURSOR_INVALID`, `UPSTREAM_UNAVAILABLE`, `UPSTREAM_CONTRACT_MISMATCH`, `TIMEOUT`, `RESPONSE_TOO_LARGE` 등 안정적인 코드로 변환한다.
+조회 성공 응답의 `meta.target_id`에는 실제 조회한 등록 대상 ID를 포함한다.
+
+오류는 `TARGET_UNKNOWN`, `TOOL_DENIED`, `INVALID_ARGUMENT`, `KEY_SCOPE_DENIED`, `RATE_LIMITED`, `BUSY`, `SCAN_BUDGET_EXCEEDED`, `CURSOR_INVALID`, `UPSTREAM_UNAVAILABLE`, `UPSTREAM_CONTRACT_MISMATCH`, `TIMEOUT`, `RESPONSE_TOO_LARGE` 등 안정적인 코드로 변환한다.
 
 MCP 프로토콜 오류와 도구 실행 오류를 SDK 규약에 맞게 구분한다. 업스트림 오류 원문을 그대로 노출하지 않으며, 오류·timeout을 빈 정상 결과로 바꾸지 않는다.
 
@@ -313,7 +328,7 @@ stdio 업스트림 연결, `inspect_key` 등 소수 도구, 정책 검증, ACL, 
 
 ### 단계 E: 필요한 기능만 확장
 
-문자열 미리보기, 다중 대상, 원격 서비스, Cluster 등은 각각 별도 요구·위험 검토 후 추가한다.
+다중 대상 등록·라우팅은 현재 구현에 포함한다. 문자열 미리보기, 원격 서비스, Cluster 등은 각각 별도 요구·위험 검토 후 추가한다.
 
 ## 11. 설계 한계와 대안
 

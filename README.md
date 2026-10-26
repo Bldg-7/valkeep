@@ -2,22 +2,21 @@
 
 운영 Redis를 AI 클라이언트에서 조사할 때, **읽기 전용 권한과 조회 정책을 강제하는 MCP 프록시**.
 
-> 상태: 최소 stdio 프록시 구현. `inspect_key`·`list_length`만 제공하며, 실제 Redis 연결·ACL·운영 부하 검증은 아직 수행하지 않았다. 구체적인 대상 환경과 운영 정책 수치는 미정이다.
+> 상태: 다중 target stdio 프록시 구현. `list_targets`와 조회 도구 `inspect_key`·`list_length`를 제공하며, 실제 Redis 연결·ACL·운영 부하 검증은 아직 수행하지 않았다. 구체적인 대상 환경과 운영 정책 수치는 미정이다.
 
 ## 프로젝트 방향
 
 ```text
 AI 클라이언트
-  → Valkeep: 허용 도구, 인자, 키 범위, 호출 예산 검증
-    → 버전이 고정된 공식 Redis MCP
-      → 최소 권한 Redis ACL 계정
-        → Redis
+  → Valkeep: target_id 선택 및 대상별 정책 검증
+    ├─ catalog-cache → 전용 공식 Redis MCP → 전용 ACL 계정 → Redis A
+    └─ job-queue     → 전용 공식 Redis MCP → 전용 ACL 계정 → Redis B
 ```
 
 공식 Redis MCP의 조회 기능을 재사용하되, 클라이언트에는 검토한 기능만 제공한다. 기본 정책은 **명시적으로 허용하지 않은 요청은 거절**이다.
 
 - **데이터 변경 방지**: Redis ACL이 보안 경계이며, 도구 필터링은 추가 방어다.
-- **조회 부하 완화**: Valkeep이 호출 빈도, 동시 실행 수, 인자와 누적 탐색량을 제한한다.
+- **조회 부하 완화**: Valkeep이 대상별 호출 빈도, 동시 실행 수, 인자를 제한한다. 키 탐색 기능은 아직 제공하지 않는다.
 - **정보 노출 최소화**: 대상·키 범위를 제한하고 값·민감정보를 기본적으로 기록하지 않는다.
 - **명시적인 한계**: 읽기도 Redis 자원을 소비한다. 운영 무영향, 정확한 Redis CPU 예산, 실행 중인 명령의 강제 취소는 보장하지 않는다.
 
@@ -40,8 +39,8 @@ AI 클라이언트
 ### 초기 구현에서 선택한 사항
 
 - Python 3.12+ 및 MCP SDK 1.30.0, 공식 Redis MCP 0.5.1을 사용한다.
-- 첫 버전은 단일 대상·단일 프로세스의 로컬 `stdio` 프록시로 시작한다.
-- 공식 MCP를 자식 프로세스로 실행하고, 업스트림은 직접 노출하지 않는다.
+- 하나의 로컬 `stdio` 프록시에 최대 16개의 target을 등록한다. 모든 조회에서 `target_id`를 필수로 받으며 기본 대상은 없다.
+- target별 공식 MCP 자식 프로세스·자격증명·키 범위·호출 예산·감사 로그를 분리하고, 업스트림은 직접 노출하지 않는다.
 - 위험한 전체 조회 도구를 차단하고, 안전성을 검토한 도구만 제공한다.
 - 값 미리보기처럼 공식 도구로 안전하게 구현하기 어려운 기능은 초기 범위에서 제외하거나 별도 어댑터로 추가한다.
 
@@ -50,6 +49,18 @@ AI 클라이언트
 - 개발/운영 환경, Redis/Valkey 및 버전, standalone/Cluster, managed service 여부.
 - 대상 데이터의 크기 특성, 값 조회 필요 여부, 허용 키 범위.
 - 실제 운영 배포 형태, 정책 제한값, 감사 로그 보관 정책.
+
+## target 사용 예
+
+설정은 `policy_version = 2`와 `[[targets]]` 목록을 사용한다. [실행 가능한 설정 예시](config/policy.example.toml)와 [이전 설정 마이그레이션](docs/implementation.md)을 참고한다.
+
+```text
+list_targets({})
+inspect_key({"target_id": "catalog-cache", "key": "example:catalog:42"})
+list_length({"target_id": "job-queue", "key": "example:jobs:pending"})
+```
+
+`target_id` 생략·미등록 ID는 거절한다. 한 target에서 실패해도 다른 target으로 자동 재시도하지 않는다.
 
 ## 참고
 

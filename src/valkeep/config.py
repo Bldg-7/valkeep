@@ -58,7 +58,7 @@ class Limits(FrozenModel):
 
 
 class Policy(FrozenModel):
-    policy_version: Literal[1]
+    policy_version: Literal[1, 2]
     target: Target
     allowed_prefixes: Annotated[tuple[str, ...], Field(strict=False, max_length=100)] = ()
     allowed_keys: Annotated[tuple[str, ...], Field(strict=False, max_length=100)] = ()
@@ -83,16 +83,74 @@ class Policy(FrozenModel):
         return hashlib.sha256(payload.encode()).hexdigest()[:16]
 
 
-def load_policy(path: Path) -> Policy:
+class TargetEntry(Target):
+    """외부 설정의 한 target을 기존 단일 대상 실행 정책으로 변환한다."""
+
+    allowed_prefixes: Annotated[tuple[str, ...], Field(strict=False, max_length=100)] = ()
+    allowed_keys: Annotated[tuple[str, ...], Field(strict=False, max_length=100)] = ()
+    tools: Annotated[tuple[PublicTool, ...], Field(strict=False, min_length=1, max_length=2)]
+    limits: Limits = Field(default_factory=Limits)
+    audit_path: Annotated[str, Field(min_length=1)]
+
+    def as_policy(self) -> Policy:
+        values = self.model_dump()
+        connection = {name: values.pop(name) for name in Target.model_fields}
+        return Policy.model_validate({"policy_version": 2, "target": connection, **values})
+
+    @model_validator(mode="after")
+    def check_policy(self):
+        self.as_policy()
+        return self
+
+
+class ServerConfig(FrozenModel):
+    policy_version: Literal[2]
+    targets: Annotated[tuple[TargetEntry, ...], Field(strict=False, min_length=1, max_length=16)]
+    audit_path: Annotated[str, Field(min_length=1)]
+    max_request_bytes: Annotated[int, Field(ge=1024, le=65536)] = 8192
+    max_response_bytes: Annotated[int, Field(ge=16384, le=65536)] = 32768
+
+    @model_validator(mode="after")
+    def check_targets(self):
+        ids = [target.id for target in self.targets]
+        if len(ids) != len(set(ids)):
+            raise ValueError("target ID가 중복되었습니다")
+        endpoints = [
+            (target.host.lower().rstrip("."), target.port, target.database)
+            for target in self.targets
+        ]
+        if len(endpoints) != len(set(endpoints)):
+            raise ValueError("동일 endpoint와 DB를 중복 등록할 수 없습니다")
+        paths = [
+            os.path.realpath(value)
+            for value in [self.audit_path, *(target.audit_path for target in self.targets)]
+        ]
+        if len(paths) != len(set(paths)):
+            raise ValueError("감사 파일은 target 및 라우터별로 분리해야 합니다")
+        if any(
+            target.limits.max_response_bytes > self.max_response_bytes for target in self.targets
+        ):
+            raise ValueError("target 응답 상한은 서버 응답 상한 이하여야 합니다")
+        return self
+
+    @property
+    def fingerprint(self) -> str:
+        payload = json.dumps(self.model_dump(), sort_keys=True, ensure_ascii=True)
+        return hashlib.sha256(payload.encode()).hexdigest()[:16]
+
+
+def load_config(path: Path) -> ServerConfig:
     try:
         if path.stat().st_size > 65536:
             raise ValueError("설정이 너무 큽니다")
-        policy = Policy.model_validate(tomllib.loads(path.read_text(encoding="utf-8")))
-        audit = Path(policy.audit_path)
-        if not audit.is_absolute():
-            policy = policy.model_copy(update={"audit_path": str(path.resolve().parent / audit)})
-        return policy
-    except (OSError, ValueError, UnicodeError):
+        config = ServerConfig.model_validate(tomllib.loads(path.read_text(encoding="utf-8")))
+        values = config.model_dump()
+        base = path.resolve().parent
+        for item in [values, *values["targets"]]:
+            item["audit_path"] = os.path.abspath(base / item["audit_path"])
+        # 정규화 뒤 경로 별칭의 중복도 다시 검사한다.
+        return ServerConfig.model_validate(values)
+    except (OSError, ValueError, UnicodeError, RuntimeError):
         raise Rejected(Code.CONFIG_INVALID) from None
 
 

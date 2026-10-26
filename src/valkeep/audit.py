@@ -5,12 +5,12 @@ import os
 import stat
 import time
 
-from valkeep.config import Policy
+from valkeep.config import Policy, ServerConfig
 from valkeep.errors import Code, Rejected
 
 
 class Audit:
-    def __init__(self, policy: Policy):
+    def __init__(self, policy: Policy | ServerConfig):
         self.policy = policy
         self.failed = False
         self.fd = -1
@@ -46,11 +46,11 @@ class Audit:
             raise Rejected(Code.AUDIT_UNAVAILABLE)
         record = {
             "time": time.time(),
-            "target": self.policy.target.id,
+            "target": self.policy.target.id if isinstance(self.policy, Policy) else None,
             "policy": self.policy.fingerprint,
             "event": event,
             "request_id": request_id,
-            "tool": tool if tool in {"inspect_key", "list_length"} else "unlisted",
+            "tool": tool if tool in {"inspect_key", "list_length", "list_targets"} else "unlisted",
             "code": code,
             "elapsed_ms": elapsed_ms,
             "response_bytes": response_bytes,

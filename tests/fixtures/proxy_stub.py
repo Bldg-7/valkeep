@@ -1,13 +1,12 @@
-"""실제 공개 stdio 서버와 공식 업스트림을 연결하는 테스트 실행기."""
+"""실제 다중 target stdio 서버와 공식 업스트림을 연결하는 테스트 실행기."""
 
 import asyncio
 import logging
 import sys
 from pathlib import Path
 
-from valkeep.audit import Audit
-from valkeep.config import load_policy
-from valkeep.proxy import Proxy
+from valkeep.config import load_config
+from valkeep.runtime import open_router
 from valkeep.server import build_server
 from valkeep.transport import public_stdio
 from valkeep.upstream import connect_upstream
@@ -15,21 +14,21 @@ from valkeep.upstream import connect_upstream
 logging.disable(logging.CRITICAL)
 
 
-async def run():
-    policy = load_policy(Path(sys.argv[1]))
-    audit = Audit(policy)
+def connector(policy):
     command = (sys.executable, "-I", str(Path(__file__).with_name("official_stub.py")))
-    try:
-        async with connect_upstream(policy, command=command, environment={}) as upstream:
-            proxy = Proxy(policy, upstream, audit)
-            server = build_server(proxy)
-            try:
-                async with public_stdio(policy.limits.max_request_bytes) as streams:
-                    await server.run(*streams, server.create_initialization_options())
-            finally:
-                await proxy.close()
-    finally:
-        audit.close()
+    return connect_upstream(
+        policy,
+        command=command,
+        environment={"FIXTURE_LENGTH": str(policy.target.port), "PYTHON_DOTENV_DISABLED": "1"},
+    )
+
+
+async def run():
+    config = load_config(Path(sys.argv[1]))
+    async with open_router(config, connector=connector) as router:
+        server = build_server(router)
+        async with public_stdio(config.max_request_bytes) as streams:
+            await server.run(*streams, server.create_initialization_options())
 
 
 asyncio.run(run())
