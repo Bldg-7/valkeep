@@ -4,6 +4,7 @@ audit_path = "../valkeep.router.audit.jsonl"
 
 [[targets]]
 id = "catalog-cache"
+engine = "valkey"
 environment = "local"
 host = "127.0.0.1"
 port = 6379
@@ -22,6 +23,7 @@ key_discovery = false
 
 [[targets]]
 id = "job-queue"
+engine = "valkey"
 environment = "local"
 host = "127.0.0.1"
 port = 6380

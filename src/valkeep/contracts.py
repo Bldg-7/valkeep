@@ -1,4 +1,4 @@
-"""공식 LLEN과 Valkeep 내부 읽기 어댑터의 고정 계약."""
+"""Valkeep 전용 읽기 프로세스의 고정 입력·출력 계약."""
 
 import base64
 import json

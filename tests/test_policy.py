@@ -122,9 +122,9 @@ def test_environment_does_not_inherit_credentials(policy, monkeypatch):
     monkeypatch.setenv("REDIS_HOST", "unapproved-host")
     monkeypatch.setenv("PYTHONPATH", "/unapproved")
     env = upstream_environment(policy)
-    assert env["REDIS_PWD"] == "test-only-secret"
-    assert env["REDIS_HOST"] == "127.0.0.1"
-    assert env["PYTHON_DOTENV_DISABLED"] == "1"
+    assert env["VALKEEP_PASSWORD"] == "test-only-secret"
+    assert json.loads(env["VALKEEP_POLICY"])["target"]["host"] == "127.0.0.1"
+    assert "REDIS_HOST" not in env
     assert not {"AWS_SECRET_ACCESS_KEY", "PYTHONPATH", "VALKEEP_TEST_PASSWORD"} & env.keys()
 
 

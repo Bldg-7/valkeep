@@ -1,4 +1,4 @@
-"""실제 다중 target stdio 서버와 공식 업스트림을 연결하는 테스트 실행기."""
+"""다중 target stdio 서버와 테스트 읽기 worker를 연결하는 실행기."""
 
 import asyncio
 import logging
@@ -15,11 +15,11 @@ logging.disable(logging.CRITICAL)
 
 
 def connector(policy):
-    command = (sys.executable, "-I", str(Path(__file__).with_name("official_stub.py")))
+    command = (sys.executable, "-I", str(Path(__file__).with_name("reader_stub.py")))
     return connect_upstream(
         policy,
         command=command,
-        environment={"FIXTURE_LENGTH": str(policy.target.port), "PYTHON_DOTENV_DISABLED": "1"},
+        environment={"FIXTURE_LENGTH": str(policy.target.port)},
     )
 
 

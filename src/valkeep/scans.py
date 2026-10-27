@@ -1,4 +1,4 @@
-"""클라이언트가 Redis cursor를 직접 조작하지 못하게 하는 유한 탐색 상태."""
+"""클라이언트가 서버 cursor를 직접 조작하지 못하게 하는 유한 탐색 상태."""
 
 import secrets
 import time

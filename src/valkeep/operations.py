@@ -15,7 +15,7 @@ DESCRIPTIONS = {
         "전체 키 목록이나 시점 일관성을 보장하지 않습니다."
     ),
     "connection_status": (
-        "Redis PING으로 현재 연결·인증을 점검합니다. 읽기 전용 ACL 검증은 아닙니다."
+        "Valkey/Redis 연결·엔진·인증을 점검합니다. 읽기 전용 ACL 검증은 아닙니다."
     ),
 }
 

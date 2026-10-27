@@ -123,7 +123,7 @@ class Proxy:
                 return failure(Code.AUDIT_UNAVAILABLE)
             return failure(Code.TIMEOUT)
         except asyncio.CancelledError:
-            # 응답 대기 취소와 실제 Redis 호출의 수명을 분리한다.
+            # 응답 대기 취소와 실제 서버 호출의 수명을 분리한다.
             self._emit("response_cancelled", request_id, name, "CANCELLED")
             raise
 

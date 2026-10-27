@@ -1,4 +1,4 @@
-"""공식 Redis MCP를 격리된 환경의 자식 프로세스로 관리한다."""
+"""Valkeep 전용 Valkey 읽기 프로세스를 격리된 환경에서 관리한다."""
 
 import asyncio
 import contextlib
@@ -18,12 +18,10 @@ from valkeep.transport import message_streams
 BOOTSTRAP = """
 import logging
 from importlib.metadata import version
-assert version("redis-mcp-server") == "0.5.1"
+assert version("valkey") == "6.2.0"
 assert version("mcp") == "1.30.0"
 logging.disable(logging.CRITICAL)
-from src.main import main
-from valkeep.reader import register
-register()
+from valkeep.worker import main
 main()
 """
 

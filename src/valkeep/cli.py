@@ -33,7 +33,7 @@ async def check_connections(config) -> dict:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="읽기 전용 Redis MCP 정책 프록시")
+    parser = argparse.ArgumentParser(description="읽기 전용 Valkey MCP 정책 프록시")
     parser.add_argument("--config", required=True, type=Path, help="TOML 정책 파일")
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--check-config", action="store_true", help="연결 없이 설정만 검증")
@@ -56,7 +56,7 @@ def main() -> None:
                 raise Rejected(Code.TARGET_UNKNOWN)
             config = config.model_copy(update={"targets": selected})
         if args.check_config:
-            print("설정 검증 완료 (Redis 연결·ACL 검증은 수행하지 않음)", file=sys.stderr)
+            print("설정 검증 완료 (Valkey/Redis 연결·ACL 검증은 수행하지 않음)", file=sys.stderr)
         elif args.acl_plan:
             print(
                 json.dumps(
