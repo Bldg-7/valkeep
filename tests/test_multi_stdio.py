@@ -1,4 +1,4 @@
-"""단일 MCP 연결에서 서로 다른 공식 서버 프로세스로 분기되는지 확인한다."""
+"""단일 MCP 연결에서 서로 다른 읽기 worker로 분기되는지 확인한다."""
 
 import asyncio
 import json
@@ -41,7 +41,7 @@ cleanup_timeout_seconds = 0.1
     )
 
 
-async def test_two_official_processes_route_independently(tmp_path):
+async def test_two_worker_processes_route_independently(tmp_path):
     path = tmp_path / "policy.toml"
     write_multi_policy(path)
     params = StdioServerParameters(
@@ -76,7 +76,7 @@ async def test_two_official_processes_route_independently(tmp_path):
         assert {record["target"] for record in records} == {target}
 
 
-async def test_slow_official_target_does_not_block_other_target(tmp_path):
+async def test_slow_worker_target_does_not_block_other_target(tmp_path):
     path = tmp_path / "policy.toml"
     write_multi_policy(path)
     params = StdioServerParameters(

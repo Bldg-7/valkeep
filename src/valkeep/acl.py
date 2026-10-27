@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 
 from valkeep.config import Policy
+from valkeep.engine import MINIMUM_VERSIONS
 from valkeep.errors import Code, Rejected
 from valkeep.reader import escape_glob
 
@@ -17,6 +18,7 @@ COMMANDS = {
 
 
 def permission_rules(policy: Policy) -> list[str]:
+    # HELLO/AUTH는 인증·연결 협상 명령으로 별도 카테고리 권한을 열지 않는다.
     commands = {"client|setinfo"}
     for tool in policy.tools:
         commands.update(COMMANDS[tool])
@@ -34,7 +36,8 @@ def permission_rules(policy: Policy) -> list[str]:
 def plan(policy: Policy) -> dict:
     return {
         "target_id": policy.target.id,
-        "redis_minimum_version": "7.2",
+        "engine": policy.target.engine,
+        "minimum_version": ".".join(map(str, MINIMUM_VERSIONS[policy.target.engine])),
         "acl_setuser_arguments": [
             "ACL",
             "SETUSER",
@@ -58,7 +61,7 @@ def verify_export(policy: Policy, path: Path) -> dict:
         if path.stat().st_size > 65536:
             raise ValueError
         data = json.loads(path.read_text())
-        # redis-cli --json ACL GETUSER의 RESP2 결과도 지원한다.
+        # valkey-cli/redis-cli --json ACL GETUSER의 RESP2 결과도 지원한다.
         if isinstance(data, list):
             if len(data) % 2:
                 raise ValueError

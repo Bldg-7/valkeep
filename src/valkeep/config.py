@@ -7,7 +7,7 @@ import tomllib
 from pathlib import Path
 from typing import Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field, model_validator
 
 from valkeep.errors import Code, Rejected
 
@@ -21,6 +21,7 @@ class FrozenModel(BaseModel):
 
 class Target(FrozenModel):
     id: Identifier
+    engine: Literal["valkey", "redis"] = "valkey"
     environment: Literal["local", "dev", "prod"]
     host: Annotated[str, Field(min_length=1, max_length=253, pattern=r"^[a-zA-Z0-9.:-]+$")]
     port: Annotated[int, Field(ge=1, le=65535)] = 6379
@@ -55,7 +56,15 @@ class Limits(FrozenModel):
     response_timeout_seconds: Annotated[float, Field(gt=0, le=60, allow_inf_nan=False)] = 3.0
     cleanup_timeout_seconds: Annotated[float, Field(gt=0, le=60, allow_inf_nan=False)] = 5.0
     startup_timeout_seconds: Annotated[float, Field(gt=0, le=120, allow_inf_nan=False)] = 15.0
-    redis_timeout_seconds: Annotated[float, Field(ge=0.05, le=30, allow_inf_nan=False)] = 2.0
+    socket_timeout_seconds: Annotated[
+        float,
+        Field(
+            ge=0.05,
+            le=30,
+            allow_inf_nan=False,
+            validation_alias=AliasChoices("socket_timeout_seconds", "redis_timeout_seconds"),
+        ),
+    ] = 2.0
     preview_bytes: Annotated[int, Field(ge=1, le=4096)] = 1024
     scan_count_hint: Annotated[int, Field(ge=1, le=100)] = 100
     scan_calls: Annotated[int, Field(ge=1, le=100)] = 10
@@ -212,21 +221,8 @@ def upstream_environment(policy: Policy) -> dict[str, str]:
     password = os.environ.get(target.password_env)
     if not password or "\x00" in password:
         raise Rejected(Code.CONFIG_INVALID)
-    env = {
-        "PYTHON_DOTENV_DISABLED": "1",
+    return {
         "PYTHONIOENCODING": "utf-8",
-        "REDIS_HOST": target.host,
-        "REDIS_PORT": str(target.port),
-        "REDIS_DB": str(target.database),
-        "REDIS_USERNAME": target.username,
-        "REDIS_PWD": password,
-        "REDIS_SSL": "true" if target.tls else "false",
-        "REDIS_SSL_CERT_REQS": "required",
-        "REDIS_CLUSTER_MODE": "false",
-        "MCP_REDIS_LOG_LEVEL": "CRITICAL",
-        "MCP_DOCS_SEARCH_URL": "",
+        "VALKEEP_PASSWORD": password,
         "VALKEEP_POLICY": policy.model_dump_json(),
     }
-    if target.ca_file:
-        env["REDIS_SSL_CA_CERTS"] = target.ca_file
-    return env

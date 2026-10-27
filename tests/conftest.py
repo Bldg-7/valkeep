@@ -1,4 +1,4 @@
-"""실제 Redis에 연결하지 않는 테스트 구성."""
+"""실제 Valkey/Redis에 연결하지 않는 테스트 구성."""
 
 import asyncio
 import json
@@ -8,6 +8,35 @@ from mcp import types
 
 from valkeep.config import Policy, ServerConfig
 from valkeep.errors import Code, Rejected
+
+
+def pytest_addoption(parser):
+    parser.addoption(
+        "--valkey-image",
+        action="append",
+        default=[],
+        help="live 테스트에 사용할 Valkey Docker 이미지. 반복 지정 가능",
+    )
+    parser.addoption(
+        "--require-valkey",
+        action="store_true",
+        default=False,
+        help="Valkey/TLS 테스트 실행 파일이 없을 때 skip 대신 실패",
+    )
+
+
+def pytest_generate_tests(metafunc):
+    if "server_spec" in metafunc.fixturenames:
+        images = metafunc.config.getoption("--valkey-image")
+        specs = [("redis", None)]
+        ids = ["redis-native"]
+        if images:
+            specs.extend(("valkey", image) for image in images)
+            ids.extend(f"valkey-image-{index}" for index in range(len(images)))
+        else:
+            specs.append(("valkey", None))
+            ids.append("valkey-native")
+        metafunc.parametrize("server_spec", specs, ids=ids, scope="module")
 
 
 @pytest.fixture
@@ -107,6 +136,7 @@ def config(policy, tmp_path):
         **base,
         **policy.target.model_dump(),
         "id": "queue",
+        "engine": "redis",
         "port": 6380,
         "password_env": "QUEUE_PASSWORD",
         "audit_path": str(tmp_path / "queue.jsonl"),

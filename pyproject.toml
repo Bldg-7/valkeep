@@ -4,15 +4,14 @@ build-backend = "hatchling.build"
 
 [project]
 name = "valkeep"
-version = "0.3.0"
-description = "운영 Redis 조회 정책을 강제하는 읽기 전용 MCP 프록시"
+version = "0.4.0"
+description = "Valkey 조회 정책과 접근 범위를 통제하는 읽기 전용 MCP"
 requires-python = ">=3.12"
 dependencies = [
   "anyio==4.15.1",
   "mcp==1.30.0",
   "pydantic==2.14.1",
-  "redis-mcp-server==0.5.1",
-  "redis==8.1.0",
+  "valkey==6.2.0",
 ]
 
 [project.scripts]
@@ -24,7 +23,7 @@ dev = ["pytest==9.1.1", "pytest-asyncio==1.4.0", "ruff==0.17.2"]
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
-markers = ["live: 격리된 로컬 redis-server를 사용하는 실제 연동 테스트"]
+markers = ["live: 격리된 로컬 Valkey/Redis를 사용하는 실제 연동 테스트"]
 
 [tool.ruff]
 target-version = "py312"

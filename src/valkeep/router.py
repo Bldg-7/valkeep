@@ -25,7 +25,7 @@ class Router:
                 name="list_targets",
                 description=(
                     "등록된 target의 ID·환경·허용 도구·프록시 상태를 확인합니다. "
-                    "Redis 연결 검사는 아닙니다."
+                    "Valkey/Redis 연결 검사는 아닙니다."
                 ),
                 inputSchema={"type": "object", "properties": {}, "additionalProperties": False},
                 annotations=types.ToolAnnotations(readOnlyHint=True, openWorldHint=False),
@@ -75,6 +75,7 @@ class Router:
                     {
                         "id": target.id,
                         "environment": target.environment,
+                        "engine": target.engine,
                         "tools": list(target.effective_tools),
                         "discovery_scopes": (
                             list(proxy.scans.scopes)

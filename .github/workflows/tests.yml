@@ -1,0 +1,50 @@
+name: Tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  unit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.13"
+      - run: uv sync --locked
+      - run: uv run --locked ruff check .
+      - run: uv run --locked ruff format --check .
+      - run: uv run --locked pytest -q -m "not live"
+      - run: uv build
+
+  valkey:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - version: "8.1.6"
+            image: valkey/valkey@sha256:1f84517eca8e0dd9585ed57c572796f32839e1b0e7ce07ad28e6bce098468371
+          - version: "9.1.2"
+            image: valkey/valkey@sha256:418652cfb58ef879d4978c33553735d7147016032d5aefaa14c828e611eb9dfd
+    name: Valkey ${{ matrix.version }} (plaintext + TLS)
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.13"
+      - run: uv sync --locked
+      - name: Pull pinned Valkey image
+        env:
+          VALKEY_IMAGE: ${{ matrix.image }}
+        run: docker pull "$VALKEY_IMAGE"
+      - name: Require real Valkey coverage
+        env:
+          VALKEY_IMAGE: ${{ matrix.image }}
+        run: uv run --locked pytest -q -m live -k valkey --require-valkey --valkey-image "$VALKEY_IMAGE"

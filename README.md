@@ -2,17 +2,17 @@
 
 **English** | [한국어](README_KO.md)
 
-**Read-only Redis inspection for AI assistants, with explicit targets, scoped access, and query budgets.**
+**Read-only Valkey inspection for AI assistants, with explicit targets, scoped access, and query budgets.**
 
-Valkeep is a local [Model Context Protocol (MCP)](https://modelcontextprotocol.io/) server that puts a policy layer in front of the [official Redis MCP server](https://github.com/redis/mcp-redis). It supports multiple Redis targets without exposing an arbitrary command console.
+Valkeep is a local [Model Context Protocol (MCP)](https://modelcontextprotocol.io/) server built on the [official Valkey Python client](https://github.com/valkey-io/valkey-py). Each target runs a dedicated read-only Valkeep worker. No Redis MCP dependency or arbitrary command console is exposed. Redis is available as an explicitly configured compatibility mode.
 
 The default preset provides metadata inspection and connection checks. String previews and key discovery are separate, opt-in features.
 
 ```text
 AI client
   → Valkeep: target selection, tool permissions, key scopes, and request budgets
-    ├─ catalog-cache → dedicated MCP process + read adapter → ACL user → Redis A
-    └─ job-queue     → dedicated MCP process + read adapter → ACL user → Redis B
+    ├─ catalog-cache → dedicated Valkeep worker → ACL user → Valkey A
+    └─ job-queue     → dedicated Valkeep worker → ACL user → Valkey B
 ```
 
 ## Features
@@ -45,10 +45,10 @@ String previews default to 1,024 bytes and can be configured up to 4,096 bytes. 
 - Python 3.12 or newer
 - macOS or Linux
 - [uv](https://docs.astral.sh/uv/)
-- Standalone Redis; generated ACL plans target Redis **7.2 or newer**
-- A dedicated Redis ACL user with administrator-reviewed permissions
+- Standalone **Valkey 8.1 or newer**, or Redis 7.2+ in compatibility mode
+- A dedicated ACL user with administrator-reviewed permissions
 
-Redis Cluster, Valkey compatibility, hosted HTTP transport, and per-user authorization are outside the current supported scope.
+Live coverage includes **Valkey 8.1.6 and 9.1.2**, both plaintext and TLS, plus a local Redis compatibility regression suite. This is not a guarantee for every version or managed service. Cluster, hosted HTTP transport, and per-user authorization are outside the current supported scope.
 
 ## Quick start
 
@@ -73,13 +73,15 @@ cp config/policy.example.toml config/policy.local.toml
 
 Edit the [example policy](config/policy.example.toml) for your approved targets:
 
-1. Set each target's ID, environment, host, port, username, and TLS settings.
+1. Set each target’s ID, engine, environment, host, port, username, and TLS settings. `engine = "valkey"` is the default; existing Redis targets must explicitly set `engine = "redis"`.
 2. Specify the key prefixes or exact keys that the AI client may inspect.
 3. Keep `preset = "production-safe"` unless you need an explicitly configured custom policy.
 4. Have an administrator review and apply the generated ACL plan.
 5. Supply each password through the environment variable named by that target's `password_env`, using your secret-management mechanism.
 
 Do not commit passwords or local configuration. `config/*.local.toml`, `.env*`, and `*.jsonl` are ignored by default.
+
+Each authenticated connection validates `HELLO 2` before sending data commands: engine identity, minimum version, and standalone mode must match the policy. An engine mismatch is rejected rather than treated as generic protocol compatibility. HELLO is a connection-handshake command; the ACL plan does not broadly grant `+@connection` for this check.
 
 The `production-safe` preset defaults to one MCP request per second and one in-flight request per target. To enable optional features, edit the **existing** `[targets.features]` table for the intended target:
 
@@ -106,7 +108,7 @@ uv run --locked valkeep --config config/policy.local.toml
 
 The connection check **does contact Redis**. Omitting `--target` checks every configured target. PING success proves connectivity and authentication, not that the account has exactly the intended read-only permissions.
 
-In server mode, Valkeep waits for MCP requests over stdio. Register Valkeep—not the underlying Redis MCP process—in your MCP client.
+In server mode, Valkeep waits for MCP requests over stdio. Register the public Valkeep server—not its internal worker—in your MCP client.
 
 A client configuration using the common `mcpServers` format looks like this; replace both absolute paths:
 
@@ -154,7 +156,7 @@ uv run --locked valkeep --config config/policy.local.toml \
 ```
 
 - **Planning:** Produces a JSON argument list for administrator review. It does not run `ACL SETUSER` or include a password. **The proposed `reset` rule removes existing permissions and passwords**; do not apply it blindly to an existing account.
-- **Verification:** Checks an administrator-provided `redis-cli --json ACL GETUSER <user>` export against the configured policy. It rejects excess permissions, unexpected selectors, channels, and mismatched key scopes.
+- **Verification:** Checks an administrator-provided `valkey-cli --json ACL GETUSER <user>` export (`redis-cli` for Redis targets) against the configured policy. It rejects excess permissions, unexpected selectors, channels, and mismatched key scopes.
 - **Limits:** Export verification is offline. It cannot establish the file's provenance, freshness, or the current permissions of a live account. `readonly_acl_confirmed = true` is an operator declaration, not an automated ACL check.
 
 ACL exports contain sensitive information, including password hashes. Handle them securely and do not commit them. Valkeep does not print the raw export or password hashes.
@@ -179,11 +181,19 @@ uv run --locked pytest -q -m live
 uv build
 ```
 
-The test suite includes unit tests, official MCP process integration, and live Redis tests. Live tests use locally installed `redis-server` and `openssl` to start isolated temporary servers on random loopback ports. They do not accept external Redis URLs and clean up the processes they create.
+The test suite includes unit tests, isolated MCP worker integration, and real Valkey/Redis tests. By default, live tests use installed `valkey-server` or `redis-server` binaries and OpenSSL; missing optional executables cause skips. Tests never accept external server URLs.
 
-Live tests are skipped if required executables are missing. Ensure they actually run in your release validation environment. Verification against a local Redis version is not certification of every Redis deployment or managed service.
+For required Valkey coverage using Docker, run the pinned 8.1.6 and 9.1.2 image matrix:
 
-The official Redis MCP server 0.5.1, MCP Python SDK 1.30.0, redis-py 8.1.0, and transitive dependencies are pinned through `pyproject.toml` and `uv.lock`.
+```bash
+uv run --locked pytest -q --require-valkey \
+  --valkey-image valkey/valkey@sha256:1f84517eca8e0dd9585ed57c572796f32839e1b0e7ce07ad28e6bce098468371 \
+  --valkey-image valkey/valkey@sha256:418652cfb58ef879d4978c33553735d7147016032d5aefaa14c828e611eb9dfd
+```
+
+`--require-valkey` fails instead of silently skipping missing Valkey/TLS prerequisites. Docker tests create temporary configs, credentials, and TLS certificates, publish random ports on loopback only, and remove their containers afterward. GitHub Actions is configured to run the same pinned Valkey matrix. Verification is not certification of every managed service.
+
+The official Valkey client (`valkey==6.2.0`), MCP Python SDK 1.30.0, and transitive dependencies are pinned through `pyproject.toml` and `uv.lock`. Version 0.4 removes `redis-mcp-server` and `redis-py`; `socket_timeout_seconds` replaces `redis_timeout_seconds` (the old input name is accepted for migration).
 
 ## Documentation
 

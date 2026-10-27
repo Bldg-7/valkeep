@@ -1,16 +1,17 @@
-"""공식 MCP 프로세스 안에서 실행하는 제한된 읽기 어댑터."""
+"""격리된 Valkey 조회 프로세스에서 실행하는 제한된 읽기 어댑터."""
 
 import base64
 import json
 import os
 from typing import Any
 
-import redis
-from redis.backoff import NoBackoff
-from redis.exceptions import NoPermissionError, RedisError, ResponseError
-from redis.retry import Retry
+import valkey
+from valkey.backoff import NoBackoff
+from valkey.exceptions import NoPermissionError, ResponseError, ValkeyError
+from valkey.retry import Retry
 
 from valkeep.config import Policy
+from valkeep.engine import ConnectionPolicyError, initialize_connection
 from valkeep.errors import Code, Rejected
 
 LENGTH_COMMANDS = {
@@ -27,23 +28,24 @@ def escape_glob(value: str) -> str:
     return "".join("\\" + char if char in "*?[]\\" else char for char in value)
 
 
-def create_client(policy: Policy) -> redis.Redis:
+def create_client(policy: Policy) -> valkey.Valkey:
     target = policy.target
-    return redis.Redis(
+    return valkey.Valkey(
         host=target.host,
         port=target.port,
         db=target.database,
         username=target.username,
-        password=os.environ.get(target.password_env) or os.environ["REDIS_PWD"],
+        password=os.environ.get("VALKEEP_PASSWORD") or os.environ[target.password_env],
         ssl=target.tls,
         ssl_ca_certs=target.ca_file,
         ssl_cert_reqs="required",
         ssl_check_hostname=True,
         decode_responses=False,
         protocol=2,
+        valkey_connect_func=lambda connection: initialize_connection(connection, target.engine),
         max_connections=policy.limits.max_inflight,
-        socket_timeout=policy.limits.redis_timeout_seconds,
-        socket_connect_timeout=policy.limits.redis_timeout_seconds,
+        socket_timeout=policy.limits.socket_timeout_seconds,
+        socket_connect_timeout=policy.limits.socket_timeout_seconds,
         retry=Retry(NoBackoff(), 0),
         retry_on_error=[],
         health_check_interval=0,
@@ -110,11 +112,13 @@ class Reader:
             return {"ok": True, "data": data}
         except Rejected as exc:
             return {"ok": False, "code": exc.code.value}
+        except ConnectionPolicyError as exc:
+            return {"ok": False, "code": exc.code.value}
         except NoPermissionError:
             return {"ok": False, "code": Code.PERMISSION_DENIED.value}
         except ResponseError:
             return {"ok": False, "code": Code.KEY_CHANGED.value}
-        except RedisError:
+        except ValkeyError:
             return {"ok": False, "code": Code.UPSTREAM_UNAVAILABLE.value}
         except (ValueError, TypeError, UnicodeError):
             return {"ok": False, "code": Code.INVALID_ARGUMENT.value}
@@ -179,20 +183,3 @@ class Reader:
             "observed": len(values),
             "truncated": dropped,
         }
-
-
-def register(client=None):
-    from src.common.connection import RedisConnectionManager
-    from src.common.server import mcp
-
-    policy = Policy.model_validate_json(os.environ["VALKEEP_POLICY"]) if client is None else None
-    client = create_client(policy) if client is None else client
-    # 공식 LLEN도 같은 제한된 연결 설정을 사용하게 한다.
-    RedisConnectionManager._instance = client
-    RedisConnectionManager.get_connection = classmethod(lambda cls, **kwargs: client)
-    reader = Reader(client, policy)
-
-    @mcp.tool()
-    async def valkeep_read(request: str) -> dict[str, Any]:
-        """Valkeep 정책을 통과한 내부 읽기 요청만 처리한다."""
-        return reader.execute(request)

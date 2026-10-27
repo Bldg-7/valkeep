@@ -24,7 +24,7 @@ def test_check_config_without_credentials():
     )
     assert result.returncode == 0
     assert result.stdout == b""
-    assert "Redis 연결·ACL 검증은 수행하지 않음" in result.stderr.decode()
+    assert "Valkey/Redis 연결·ACL 검증은 수행하지 않음" in result.stderr.decode()
 
 
 def test_bad_configuration_is_sanitized(tmp_path):

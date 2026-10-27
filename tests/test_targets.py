@@ -41,6 +41,7 @@ async def test_list_targets_is_local_and_hides_connections(router, upstreams):
     result = await router.execute("list_targets", {})
     targets = result.structuredContent["data"]["targets"]
     assert [target["id"] for target in targets] == ["catalog", "queue"]
+    assert [target["engine"] for target in targets] == ["valkey", "redis"]
     assert targets[0]["tools"] == ["inspect_key"]
     encoded = result.model_dump_json()
     for secret in ["127.0.0.1", "6379", "reader", "CATALOG_PASSWORD", "catalog:"]:
@@ -164,8 +165,8 @@ def test_credentials_are_not_cross_inherited(config, monkeypatch):
     monkeypatch.setenv("CATALOG_PASSWORD", "synthetic-catalog")
     monkeypatch.setenv("QUEUE_PASSWORD", "synthetic-queue")
     a, b = [upstream_environment(target.as_policy()) for target in config.targets]
-    assert a["REDIS_PWD"] == "synthetic-catalog"
-    assert b["REDIS_PWD"] == "synthetic-queue"
+    assert a["VALKEEP_PASSWORD"] == "synthetic-catalog"
+    assert b["VALKEEP_PASSWORD"] == "synthetic-queue"
     assert "synthetic-queue" not in a.values()
     assert "synthetic-catalog" not in b.values()
 

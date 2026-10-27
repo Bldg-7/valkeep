@@ -1,180 +1,121 @@
 # Valkeep 설계
 
-현재 구현은 다중 standalone Redis용 로컬 stdio MCP다. 실제 설정과 실행 절차는 [구현·실행 안내](implementation.md)를 참고한다. 운영 부하 허용치와 managed service 호환성은 별도 검증 대상이다.
+Valkeep 0.4는 **Valkey 우선의 다중 대상 읽기 전용 로컬 stdio MCP**다. Redis는 engine=redis를 명시하는 호환 모드다. [실행 안내](implementation.md)와 [설정 예시](../config/policy.example.toml)를 함께 참고한다.
 
 ## 1. 전체 구조
 
 ```text
 AI 클라이언트
-  │ MCP / stdio
+  │ 공개 MCP / stdio
   ▼
-Valkeep
-  ├─ 공개 도구 계약·target 라우터
-  ├─ 공통 입력·출력 상한 및 라우터 감사
+Valkeep 라우터
+  ├─ 도구 계약·명시적인 target_id·공통 입력/응답 상한·라우터 감사
   ├─ target A: 정책·limiter·탐색 상태·감사·수명 태스크
-  │    └─ 공식 Redis MCP 자식 A
-  │         ├─ 공식 LLEN 도구
-  │         └─ Valkeep 읽기 어댑터 → 전용 ACL 계정 → Redis A
+  │    └─ Valkeep worker A → 공식 valkey-py → 전용 ACL 계정 → Valkey A
   └─ target B: 정책·limiter·탐색 상태·감사·수명 태스크
-       └─ 공식 Redis MCP 자식 B → 전용 ACL 계정 → Redis B
+       └─ Valkeep worker B → 공식 valkey-py → 전용 ACL 계정 → Valkey B
 ```
 
-공식 서버를 fork하지 않는다. 고정 버전의 서버를 실행하면서 제한된 `valkeep_read` 내부 도구를 추가한다. 이 도구는 AI 클라이언트에 직접 노출하지 않는다. 공식 서버의 다른 도구도 자동 공개하지 않는다.
+0.3까지 사용한 Redis 공식 MCP 의존성은 제거했다. 별도 서버에 도구를 덧붙이는 대신 Valkeep 전용 worker에 검토한 읽기 도구만 등록한다. worker와 공개 MCP 사이의 구분은 target별 실행 중단·자격증명 분리와 메시지 계약 검증을 위해 유지한다.
 
-## 2. 책임 분리
+## 2. 엔진·프로토콜·지원 범위
 
-| 계층 | 책임 |
-|---|---|
-| 공개 MCP 서버 | 검토한 도구의 이름·설명·입력 스키마만 노출 |
-| 라우터 | 명시적인 target_id 검사, 대상 선택, 공통 감사 |
-| 대상 정책 | 허용 도구·키 범위·기능·제한값 검사 |
-| 실행 제어 | 호출률·동시 실행·timeout·실제 실행 수명 관리 |
-| 탐색 상태 | opaque token, 누적 호출·관측·시간·상태 개수 제한 |
-| 공식 MCP 및 읽기 어댑터 | 검토한 Redis 명령만 실행, 제한된 값 조회 |
-| Redis ACL | 데이터 변경·불필요한 명령·키 접근의 서버 측 차단 |
+- 연결 client는 공식 valkey-py 6.2.0, MCP SDK는 1.30.0으로 고정한다.
+- target.engine은 valkey 또는 redis이며 기본값은 valkey다.
+- 최소 버전 정책은 Valkey 8.1, Redis 호환 모드 7.2다.
+- 데이터 프로토콜은 RESP2로 고정하고 standalone만 지원한다.
+- 관리형 서비스·Cluster·Sentinel·서버 위조 방지를 위한 별도 증명은 범위 밖이다.
 
-ACL은 호출률·명령 인자·SCAN 순회량을 제한하지 않는다. 반대로 프록시의 도구 필터만으로 실제 Redis 계정이 read-only임을 보증하지 않는다.
+client의 인증·TLS·DB 선택 이후 HELLO 2를 실행하여 server·version·proto·mode를 검증한다. 설정과 실제 엔진이 다르면 ENGINE_MISMATCH, 버전 미달은 UNSUPPORTED_SERVER_VERSION, 지원하지 않는 topology는 UNSUPPORTED_TOPOLOGY다. 정상 데이터 명령 전에 연결 단계에서 실패하며 재연결에서도 검사한다.
 
-## 3. 구성 및 프리셋
+HELLO 결과는 server가 제공하는 정보다. TLS 인증서와 hostname 검증을 대체하지 않는다. 인식할 수 없는 정보로 임의의 Redis 호환 서버를 자동 승인하지 않는다.
 
-외부 설정은 `policy_version = 2`, `[[targets]]` 목록이다. 최대 16개 target을 허용한다. 설정은 프로세스 소유이며 도구 호출로 바꿀 수 없다.
+## 3. 설정 및 프리셋
 
-- `production-safe`는 메타데이터·List 길이·PING 점검만 기본 허용한다.
-- `features.value_preview`, `features.key_discovery`로 추가 기능을 각각 켠다.
-- 명시적인 `tools`는 고급 custom 경로이며 features와 함께 사용하지 않는다. 기존 설정처럼 preset이 없으면 custom으로 해석하고, production-safe와 tools를 함께 지정하면 거절한다.
-- 프리셋의 호출률·동시 실행·탐색 예산 상한을 넘으면 시작을 거절한다.
-- endpoint·계정·허용 키 범위·감사 경로·관리자의 ACL 확인 선언은 명시해야 한다.
-- 중복 ID, 같은 host/port/database 조합, 감사 파일 경로 충돌을 거절한다.
-- 다른 DNS 별칭이나 다른 logical DB가 같은 Redis 자원을 공유하는지는 자동 감지하지 않는다.
+policy_version=2와 최대 16개의 [[targets]] 목록을 사용한다. 정책은 프로세스 소유이며 도구 호출로 변경할 수 없다. 모든 조회에 target_id를 필수로 받는다.
 
-설정 예시는 [policy.example.toml](../config/policy.example.toml)에 있다. 하나의 target만 있어도 조회에서 target_id를 생략할 수 없다.
+production-safe는 메타데이터·List 길이·연결 점검만 제공하며 값 미리보기·탐색은 features로 각각 켠다. 제한 상한을 검증하며, 고급 tools 설정은 custom 경로로 분리한다. 기존처럼 preset 없이 tools를 명시하면 custom으로 해석한다.
 
-## 4. 대상별 수명과 장애 격리
+target마다 연결·자격증명·도구·키 범위·제한·감사를 분리한다. 중복 ID·직접 중복 endpoint/DB·감사 파일 경로 충돌을 거절한다. DNS 별칭과 logical DB의 물리 자원 공유까지 자동 감지하지 않는다.
 
-각 target의 별도 asyncio 태스크가 해당 MCP ClientSession과 자식 프로세스의 생성·종료를 소유한다. 여러 세션의 취소 범위를 하나의 태스크에 중첩하지 않는다.
+기존 Redis target은 engine=redis를 명시해야 한다. 소켓 제한의 새 이름은 socket_timeout_seconds이며 redis_timeout_seconds는 입력 별칭으로만 유지한다. 모호한 이중 설정은 거절한다.
 
-시작 순서:
+## 4. 수명 및 신뢰 경계
 
-1. 모든 설정과 필요한 비밀번호 환경변수 존재를 검증한다.
-2. target별 감사 파일과 공식 MCP 프로세스를 생성한다.
-3. 고정 버전·필요 도구 입력 계약을 검증한다.
-4. 하나라도 실패하면 시작한 프로세스를 정리하고 공개 MCP 시작을 거절한다.
-5. 모두 성공하면 공개 MCP를 시작한다. 실제 Redis 연결은 첫 데이터/연결 점검 요청 시 생성된다.
+target마다 별도 asyncio 태스크가 MCP ClientSession과 자식 프로세스 수명을 소유한다. 시작 단계에서 모든 설정·비밀번호 존재·필요 도구 계약을 검증한다. 하나라도 실패하면 시작한 프로세스를 정리하고 공개 서버 시작을 거절한다.
 
-실행 중 한 target의 지연·프로세스 비정상 종료·감사 오류는 그 target을 차단한다. 다른 정상 target은 계속 사용할 수 있다. 공통 라우터 감사 실패는 모든 새 조회를 차단한다.
+Redis/Valkey 연결은 첫 요청 시 생성된다. worker 초기화 완료를 서버 연결 정상으로 표현하지 않는다. 실행 중 한 target의 오류·지연·대상 감사 실패는 다른 정상 target과 분리한다. 공통 라우터 감사 실패는 모든 새 조회를 차단한다.
 
-등록된 모든 target은 동일 로컬 MCP 사용자가 접근할 수 있다. 사용자별 권한 분리나 강한 동일 OS 사용자 격리를 제공하는 구조는 아니다.
+자식은 선택한 비밀번호와 정책만 환경변수로 받으며 부모의 임의 환경변수·경로를 상속하지 않는다. 인증정보를 명령행에 넣지 않는다. 동일 OS 사용자의 프로세스 접근을 완전히 격리하거나 사용자별 target 권한을 분리하는 서비스는 아니다.
 
-## 5. 공개 API와 실제 명령
+## 5. 조회 계약
 
-| 공개 도구 | 내부 실행 | 비용·제약 |
+| 공개 도구 | 실제 명령 | 경계 |
 |---|---|---|
-| list_targets | 로컬 상태만 조회 | Redis 명령 없음, 접속 정보 미노출 |
-| inspect_key | TYPE, PTTL, 타입별 길이 명령 | 최대 3개 명령, 값은 반환하지 않음 |
-| list_length | 공식 LLEN 도구 | 값 조회 없음 |
-| connection_status | PING | 현재 연결·인증 점검, ACL 전체 검증 아님 |
-| preview_key | TYPE, STRLEN, GETRANGE | String만, 앞부분 바이트 한도 강제 |
-| find_keys | SCAN 1회 | COUNT 힌트·prefix·누적 예산 적용 |
+| list_targets | 로컬 상태만 조회 | ID·engine·환경·도구·scope ID, 접속 정보 미노출 |
+| inspect_key | TYPE, PTTL, 타입별 길이 명령 | 최대 3개 데이터 명령, 값 미조회 |
+| list_length | LLEN | 키 범위 재검증, 별도 외부 MCP 사용 안 함 |
+| connection_status | 연결 협상 후 PING | 인증·엔진 확인, ACL 전체 검증은 아님 |
+| preview_key | TYPE, STRLEN, GETRANGE | String만, 앞부분 바이트 상한 |
+| find_keys | SCAN 1회 | literal prefix·힌트·누적 탐색 예산 |
 
-타입별 길이는 STRLEN/LLEN/HLEN/SCARD/ZCARD/XLEN으로 구한다. 모듈 타입 등 길이 조회를 지원하지 않는 타입은 길이 null을 반환한다.
+입력과 출력 스키마를 공개 서버·worker 경계에서 검증한다. 등록되지 않은 도구를 직접 호출해도 실행하지 않는다. worker도 정책의 도구·키·preview limit·scan prefix/COUNT를 재검사한다.
 
-여러 명령을 순서대로 실행하므로 메타데이터와 미리보기는 `atomic=false`다. 타입 변경으로 발생한 명령 오류를 정상적인 빈 데이터로 바꾸지 않는다.
+resources·prompts·sampling·elicitation은 외부로 중계하지 않는다. 불필요한 쓰기·관리·구독 도구 자체를 worker에 등록하지 않는다. 범용 execute_command 인터페이스는 제공하지 않는다.
 
-## 6. String 미리보기
+## 6. 메타데이터 및 미리보기
 
-사용자에게 byte limit·offset을 임의 인자로 받지 않는다. 정책의 `preview_bytes`를 사용하여 `GETRANGE 0 N-1`만 실행한다.
+타입별 길이는 STRLEN/LLEN/HLEN/SCARD/ZCARD/XLEN으로 구한다. 미지원 타입은 길이 null을 반환한다. 여러 명령 간 데이터 변경을 허용하되 atomic=false를 명시하고 타입 변경 오류를 빈 정상 결과로 바꾸지 않는다.
 
-- 기본 1,024바이트, 설정 가능한 상한 4,096바이트.
-- String이 아니면 UNSUPPORTED_TYPE으로 거절한다.
-- UTF-8이 아니거나 문자 경계에서 끊기면 base64로 반환한다.
-- 관측된 전체 길이가 더 크거나 조회 한도에 도달하면 truncated=true로 표시한다.
-- 크기 관측과 미리보기 사이의 변경을 허용하되 원자적 결과로 주장하지 않는다.
-- 값은 로그에 기록하지 않고, 도구 설명에서 신뢰할 수 없는 데이터임을 명시한다.
+String 미리보기는 정책 한도 내에서 GETRANGE 0 N-1을 실행한다. 기본 1KB·최대 4KB이며 전체 GET 후 사후 절단하지 않는다. 잘린 UTF-8·바이너리는 base64로 표현한다. Hash 필드·List 원소 등의 큰 값 문제를 우회하여 전체 조회하는 경로는 없다.
 
-Hash 필드·List 원소 등의 값은 개수만으로 바이트 상한을 보장할 수 없으므로 현재 미리보기에서 지원하지 않는다. 전체 GET 후 사후 절단하는 경로도 없다.
+## 7. 탐색 상태 및 예산
 
-## 7. 키 탐색과 토큰
+find_keys는 target_id, scope_id와 선택적인 일회용 token만 받는다. 사용자가 cursor·pattern·COUNT를 직접 조작할 수 없다. prefix의 glob 특수문자를 escape하고 반환 키도 어댑터와 부모에서 검사한다.
 
-### 입력과 범위
+내부 상태에는 target별 scope·prefix·cursor·만료·누적 호출/관측·중복 집합·실행 중 여부를 보관한다. 토큰은 난수이며 대상·scope·현재 프로세스에 묶인다. 호출률·슬롯·감사 확보 뒤 토큰을 소비하고 성공적인 다음 페이지에만 새 토큰을 발급한다.
 
-`find_keys`는 target_id, scope_id, 선택적인 token만 받는다. scope_id는 설정의 literal prefix에 대응한다. 사용자에게 pattern·cursor·COUNT를 받지 않는다.
+빈 페이지·중복 키도 예산을 소비한다. 활성 상태 수와 중복 집합 크기를 제한한다. cursor 종료, 호출/관측/시간 예산, 결과 생략·오류 때 상태를 제거한다. partial, truncated, scan_complete, stop_reason, next_token으로 종료 사유를 표현한다.
 
-prefix의 Redis glob 특수문자를 escape하고 끝에만 `*`를 붙인다. 어댑터와 부모 모두 반환 키의 prefix를 확인한다. 키는 유효한 UTF-8과 설정된 바이트 상한을 만족해야 한다.
+SCAN COUNT는 힌트여서 한 페이지가 관측 예산·예상 크기를 넘을 수 있다. 마지막 페이지의 실제 관측 합계를 숨기지 않고 탐색을 종료한다. 결과 일부를 버리면 계속 조회해도 전체 결과인 것처럼 주장하지 않는다. MATCH와 ACL 키 범위는 내부 탐색 비용의 엄격한 격리가 아니다.
 
-### 상태와 예산
+## 8. 부하·timeout·감사
 
-target별 Scans 객체가 다음을 보유한다.
+target별 token bucket과 실행 슬롯으로 대기열 없이 제한한다. MCP 한 호출은 여러 서버 명령을 포함할 수 있어 CPU·실제 명령 수의 정확한 상한은 아니다.
 
-- 내부 세션 ID, scope와 prefix, 만료 시각, Redis cursor.
-- 누적 SCAN 호출 수, 관측 키 수, 중복 제거 집합.
-- 현재 처리 중 여부와 외부 일회용 토큰 매핑.
+공식 client에 socket/connect timeout, retry=0을 지정한다. 응답 timeout·취소와 실제 실행 수명을 분리하고 종료 확인 전까지 슬롯을 유지한다. 정리 시간을 넘으면 해당 자식을 종료하고 target을 차단한다. 이미 서버에서 실행 중인 명령의 취소를 보장하지는 않는다.
 
-토큰은 추측 불가능한 난수다. 호출률·실행 슬롯과 시작 감사가 확보된 뒤 토큰을 소비하며, 성공한 다음 페이지에만 새 토큰을 발급한다. 같은 토큰의 동시 사용·재사용·다른 scope/target 사용은 거절한다. 재시작하면 기존 토큰은 무효다.
+공개 입력·worker 프레임·최종 결과 크기를 별도로 검사한다. 감사는 target·라우터별 owner-only 파일로 기록하고 symlink·다른 소유자·공유 권한을 거절한다. 원본 키·값·비밀번호·토큰·worker 오류 원문은 기록하지 않는다. worker stderr는 폐기한다.
 
-빈 페이지도 한 번의 호출로 계산하며 중복 키도 관측 예산에 포함한다. COUNT 힌트를 남은 예산 이내로 낮추지만 Redis가 더 반환할 수 있으므로, 실제 관측 합계는 마지막 페이지에서 예산을 초과할 수 있다. 초과 여부를 숨기지 않고 집계한 뒤 탐색을 종료한다. 활성 세션 수와 관측 집합 크기도 제한한다. 만료된 비실행 상태는 다음 요청에서 정리한다.
+## 9. ACL 프로필
 
-### 종료 및 부분 결과
+도구에서 필요한 개별 명령을 계산하고 -@all 및 %R~ 키 범위를 사용한다. CLIENT SETINFO 하위 명령만 연결 정보 등록용으로 허용하고, 0이 아닌 DB에는 SELECT를 추가한다. HELLO/AUTH는 연결 협상·인증 명령이며 이를 위해 +@connection 전체를 열지 않는다.
 
-다음 경우 이어받기 토큰을 발급하지 않고 상태를 제거한다.
+권한안에는 engine과 minimum_version을 포함한다. 현재 공통 명령 집합을 사용하지만 프로필과 최소 버전을 엔진별로 구분하고 실제 Valkey 두 버전에서 검사한다. category 이름·멤버십에 의존해 광범위 권한을 허용하지 않는다.
 
-- cursor가 0이 되어 순회 종료.
-- 호출·관측·시간 예산 도달.
-- 큰 키·바이너리 키·범위 밖 키 등의 결과 생략.
-- 클라이언트 응답 크기 초과로 키를 일부 제거.
-- 업스트림 오류·실행 정리 실패.
+계획을 자동 적용하지 않는다. reset이 기존 권한·비밀번호를 지우며 비밀번호는 별도 설정해야 함을 경고한다. 관리자 ACL GETUSER JSON 오프라인 검사에서 추가 selector·채널·쓰기·불일치 키 범위를 거절한다. export 검사는 현재 실제 계정의 권한이나 파일 출처를 증명하지 않는다.
 
-응답에 partial, truncated, scan_complete, stop_reason, next_token, 누적 calls/observed를 제공한다. cursor가 0이어도 변경 중인 DB의 시점 일관성은 보장하지 않는다.
+## 10. 검증 매트릭스
 
-**SCAN COUNT는 엄격한 반환 개수·바이트 제한이 아니다.** 한 Redis 응답의 자원 사용까지 절대 상한이 필요하면 탐색 기능을 비활성화한다. 키 prefix 필터 역시 Redis 내부 탐색 범위를 prefix만으로 제한하지 않는다.
+- Valkey 8.1.6, 9.1.2: digest가 고정된 공식 Docker 이미지, 평문·TLS 모두 실행.
+- Redis 8.10.1: 설치된 native 서버로 명시적인 호환 모드 회귀 검사.
+- 기본 테스트는 valkey-server가 설치되어 있으면 native Valkey를 사용할 수도 있다.
+- --require-valkey는 Valkey/TLS 필수 조건이 없으면 skip 대신 실패한다.
+- CI는 두 Valkey 버전을 별도 job으로 실행하도록 구성한다.
 
-## 8. timeout과 실행 예산
+임시 서버·계정·인증서·합성 데이터만 사용한다. 랜덤 host 포트는 loopback에만 공개하고 테스트 컨테이너는 종료 시 제거한다. 실제 테스트는 INFO server로 Valkey임을 확인한 후 데이터 검증을 시작한다. 외부 서버 URL을 받지 않는다.
 
-- 대상별 token bucket과 실행 슬롯으로 대기열 없이 요청을 제한한다.
-- MCP 호출 하나가 여러 Redis 명령을 수행할 수 있으므로 호출률은 Redis 명령 수의 정확한 상한이 아니다.
-- Redis client는 socket/connect timeout과 retry=0을 사용한다. 공식 LLEN도 같은 연결 설정을 사용한다.
-- 클라이언트 응답 timeout·취소와 실제 실행 수명을 분리한다.
-- 응답 대기가 끝났어도 업스트림 호출 종료 전에는 슬롯을 반환하지 않는다.
-- 정리 제한 시간까지 호출이 남으면 해당 자식 프로세스를 종료하고 target을 차단한다.
-- 이미 Redis에서 실행 중인 명령이 프로세스 종료로 반드시 중단되는 것은 아니다.
+## 11. 한계와 운영 책임
 
-공개 입력, 업스트림 줄 프레임, 직렬화된 도구 결과 크기를 각각 제한한다. 응답 제한은 이미 Redis에서 읽은 데이터 비용을 되돌리지 못하므로 실제 명령 단계의 제한과 별도로 취급한다.
-
-## 9. ACL 계획과 점검
-
-허용 도구에서 필요한 Redis 명령을 도출한다. 권한안은 `reset on -@all` 뒤에 필요한 개별 명령과 `%R~` 키 패턴을 붙이는 JSON 인자 목록이다. CLIENT SETINFO를 지원하는 Redis 7.2 이상을 기준으로 한다.
-
-- 관리자 권한이나 비밀번호를 MCP에 추가로 제공하지 않는다.
-- ACL SETUSER를 자동 실행하지 않는다.
-- 비밀번호는 권한안에 포함하지 않는다. reset이 기존 비밀번호와 권한을 지운다는 경고를 제공한다.
-- `--verify-acl`은 관리자가 제공한 ACL GETUSER JSON을 오프라인으로 검사한다.
-- 추가 selector·채널·광범위 카테고리·쓰기 명령·일치하지 않는 키 범위를 거절한다.
-- 원본 ACL export나 비밀번호 해시는 출력·로그에 남기지 않는다.
-
-오프라인 검사는 파일이 설정과 일치하는지 확인할 뿐, 그 파일이 특정 서버의 현재 계정에서 나온 것인지 증명하지 않는다. PING 연결 점검도 읽기 전용 ACL 검증이 아니다. 실제 운영 키에 쓰기 요청을 보내 검사하지 않는다.
-
-## 10. 감사와 오류
-
-라우터 및 각 target의 감사 파일을 분리한다. target ID, 정책 fingerprint, 요청 ID, 공개 도구명, 실행 결과, 지연시간·응답 크기를 기록한다. 원본 키·값·토큰·접속 URL·비밀번호·업스트림 오류 원문은 기록하지 않는다.
-
-파일은 owner-only로 생성하고 symlink·공유 권한·다른 소유자 파일을 거절한다. 완료 감사가 실패하면 조회가 이미 실행되었더라도 성공으로 보고하지 않는다. 업스트림 stderr는 폐기하고 SDK의 원본 예외 로깅을 비활성화한다.
-
-공개 오류는 TOOL_DENIED, TARGET_UNKNOWN, INVALID_ARGUMENT, KEY_SCOPE_DENIED, RATE_LIMITED, BUSY, PERMISSION_DENIED, UNSUPPORTED_TYPE, KEY_CHANGED, CURSOR_INVALID, SCAN_BUDGET_EXCEEDED, TIMEOUT, UPSTREAM_UNAVAILABLE, UPSTREAM_CONTRACT_MISMATCH, RESPONSE_TOO_LARGE, AUDIT_UNAVAILABLE 등 정해진 코드만 사용한다.
-
-## 11. 검증과 남은 운영 책임
-
-단위 테스트, 실제 공식 MCP 프로세스 테스트, 격리된 로컬 Redis 평문/TLS 테스트를 함께 사용한다. 실제 Redis에는 합성 데이터만 적재하며 권한 거절 테스트도 새로 생성한 로컬 계정으로만 수행한다.
-
-검증 범위에는 주요 타입의 메타데이터, 큰 String의 실제 GETRANGE 제한, 바이너리 값, literal glob prefix, 탐색 토큰 재사용 방지·예산, 대상 간 장애 격리, 실제 쓰기/관리 권한 거절, 신뢰되지 않는 TLS 인증서 거절이 포함된다.
-
-운영 환경의 지연·CPU·네트워크 허용치, 실제 계정 export의 신뢰 경로, 민감정보 범위, 감사 로그 회전·보관, 자격증명 회전은 별도 운영 책임이다. Cluster·Valkey·HTTP·다중 사용자 인가는 현재 지원 범위 밖이다.
+최소 버전 검사는 모든 배포의 호환성 인증이 아니다. 실제 인증 방식·관리형 프록시의 HELLO 지원·데이터 분포·부하·감사 보존·자격증명 회전은 운영 전에 검증해야 한다. 원격 다중 사용자 인증·Cluster·Sentinel·IAM은 현재 범위 밖이다.
 
 ## 12. 참고 자료
 
-- [공식 Redis MCP](https://github.com/redis/mcp-redis)
+- [Valkey Python client](https://github.com/valkey-io/valkey-py)
+- [Valkey ACL](https://valkey.io/topics/acl/)
+- [Valkey HELLO](https://valkey.io/commands/hello/)
+- [Valkey SCAN](https://valkey.io/commands/scan/)
+- [Valkey GETRANGE](https://valkey.io/commands/getrange/)
 - [MCP Python SDK](https://github.com/modelcontextprotocol/python-sdk)
-- [Redis ACL](https://redis.io/docs/latest/operate/oss_and_stack/management/security/acl/)
-- [Redis SCAN](https://redis.io/docs/latest/commands/scan/)
-- [Redis GETRANGE](https://redis.io/docs/latest/commands/getrange/)
-- [Redis PTTL](https://redis.io/docs/latest/commands/pttl/)
 
-실행 의존성은 PyPI redis-mcp-server 0.5.1, MCP SDK 1.30.0, redis-py 8.1.0 및 uv.lock의 배포 해시로 고정한다.
+실행 의존성은 valkey 6.2.0, MCP SDK 1.30.0 및 uv.lock의 배포 해시로 고정한다.

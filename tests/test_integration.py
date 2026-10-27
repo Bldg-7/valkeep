@@ -1,4 +1,4 @@
-"""Redis 접속 없이 실제 공식 MCP와 stdio 계약을 검증한다."""
+"""네트워크 접속 없이 전용 읽기 worker와 stdio 계약을 검증한다."""
 
 import asyncio
 import json
@@ -17,11 +17,11 @@ from valkeep.proxy import Proxy
 from valkeep.upstream import connect_upstream
 
 FIXTURES = Path(__file__).parent / "fixtures"
-OFFICIAL = (sys.executable, "-I", str(FIXTURES / "official_stub.py"))
+WORKER = (sys.executable, "-I", str(FIXTURES / "reader_stub.py"))
 
 
-async def test_pinned_official_contract_and_results(policy):
-    async with connect_upstream(policy, command=OFFICIAL, environment={}) as upstream:
+async def test_worker_contract_and_results(policy):
+    async with connect_upstream(policy, command=WORKER, environment={}) as upstream:
         assert upstream.extra_tools > 0
         result = await upstream.call(
             "valkeep_read", {"request": json.dumps({"operation": "inspect_key", "key": "safe:a"})}
@@ -40,7 +40,7 @@ async def test_pinned_official_contract_and_results(policy):
 
 async def test_real_sync_worker_timeout_is_killed(policy):
     audit = Audit(policy)
-    async with connect_upstream(policy, command=OFFICIAL, environment={}) as upstream:
+    async with connect_upstream(policy, command=WORKER, environment={}) as upstream:
         proxy = Proxy(policy, upstream, audit)
         result = await proxy.execute("inspect_key", {"key": "safe:slow"})
         assert result.structuredContent["error"]["code"] == "TIMEOUT"
@@ -146,7 +146,7 @@ async def test_real_cli_initializes_without_redis(tmp_path):
             assert len(listed.tools) == 3
     events = [json.loads(line) for line in (tmp_path / "audit.jsonl").read_text().splitlines()]
     assert events[0]["code"] == "CONTRACT_VERIFIED"
-    assert events[0]["ignored_tools"] > 0
+    assert events[0]["ignored_tools"] == 0
     assert len(events) == 1
 
 
